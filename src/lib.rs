@@ -25,14 +25,14 @@ enum Command {
 impl Command {
     fn value(self) -> String {
         match self {
-            Command::Set { key: _, value } => value,
+            Command::Set { value, .. } => value,
             _ => panic!("Expected Set command"),
         }
     }
 
     fn key(self) -> String {
         match self {
-            Command::Set { key, value: _ } => key,
+            Command::Set { key, .. } => key,
             Command::Remove { key } => key,
         }
     }
@@ -41,13 +41,18 @@ impl Command {
 const COMPACTION_THRESHOLD: u64 = 1024 * 1024;
 
 /// Key-value store for storing strings.
-/// rust ```
+/// ```
+/// use kvs::Result;
 ///
-/// # fn main() {
+/// # fn main() -> Result<()> {
+///     use tempfile::TempDir;
 ///     use kvs::KvStore;
-///     let mut kv = KvStore::new();
-///     kv.set("a".to_owned(), "b".to_owned());
-///     assert_eq!(kv.get("a".to_owned()), Some("b".to_owned()));
+///
+///     let temp_dir = TempDir::new().expect("unable to create temporary working directory");
+///     let mut kv = KvStore::open(temp_dir.path())?;
+///     kv.set("a".to_owned(), "b".to_owned())?;
+///     assert_eq!(kv.get("a".to_owned())?, Some("b".to_owned()));
+/// #   Ok(())
 /// # }
 /// ```
 pub struct KvStore {
@@ -101,7 +106,7 @@ impl KvStore {
             .create_new(true)
             .open(&compact_path)?;
 
-        let offsets = index.values().map(|o| *o).collect::<Vec<_>>();
+        let offsets = index.values().cloned().collect::<Vec<_>>();
         // Use our updated index to figure out what data is fresh
         for offset in offsets {
             self.file.seek(SeekFrom::Start(offset))?;
@@ -121,13 +126,19 @@ impl KvStore {
 
     /// Maps a key in the storage to a specific value.
     /// Overwrites previous value if the key already exists.
-    /// rust ```
-    /// # fn main() {
+    /// ```
+    /// use kvs::Result;
+    ///
+    /// # fn main() -> Result<()> {
     ///     use kvs::KvStore;
-    ///     let mut kv = KvStore::new();
-    ///     kv.set("key".to_owned(), "1".to_owned());
-    ///     kv.set("key".to_owned(), "2".to_owned());
-    ///     assert_eq!(kv.get("key".to_owned()), Some("2".to_owned()));
+    ///     use tempfile::TempDir;
+    ///
+    ///     let temp_dir = TempDir::new().expect("unable to create temporary working directory");
+    ///     let mut kv = KvStore::open(temp_dir.path())?;
+    ///     kv.set("key".to_owned(), "1".to_owned())?;
+    ///     kv.set("key".to_owned(), "2".to_owned())?;
+    ///     assert_eq!(kv.get("key".to_owned())?, Some("2".to_owned()));
+    /// #   Ok(())
     /// # }
     /// ```
     pub fn set(&mut self, key: String, value: String) -> Result<()> {
@@ -151,7 +162,7 @@ impl KvStore {
     }
 
     fn build_index(&mut self) -> Result<&mut HashMap<String, u64>> {
-        if let None = self.index {
+        if self.index.is_none() {
             // Read from beginning
             self.file.seek(SeekFrom::Start(0))?;
 
@@ -165,7 +176,7 @@ impl KvStore {
 
                 if let Some(cmd) = cmds.next() {
                     match cmd? {
-                        Command::Set { key, value: _ } => map.insert(key, offset),
+                        Command::Set { key, .. } => map.insert(key, offset),
                         Command::Remove { key } => map.remove(&key),
                     };
                 } else {
@@ -184,7 +195,7 @@ impl KvStore {
     pub fn get(&mut self, key: String) -> Result<Option<String>> {
         let map = self.build_index()?;
 
-        if let Some(offset) = map.get(&key).map(|i| *i) {
+        if let Some(offset) = map.get(&key).cloned() {
             self.file.seek(SeekFrom::Start(offset))?;
             let mut de = Deserializer::from_reader(&self.file);
             let cmd: Command = serde::de::Deserialize::deserialize(&mut de).expect("bad offset");
@@ -196,13 +207,19 @@ impl KvStore {
 
     /// Removes a key and its value from the storage.
     /// Does nothing if the key is not present in the storage.
-    /// rust ```
-    /// # fn main() {
+    /// ```
+    /// use kvs::Result;
+    ///
+    /// # fn main() -> Result<()> {
     ///     use kvs::KvStore;
-    ///     let mut kv = KvStore::new();
-    ///     kv.set("key".to_owned(), "1".to_owned());
-    ///     kv.remove("key".to_owned());
-    ///     assert_eq!(kv.get("key".to_owned()), None);
+    ///     use tempfile::TempDir;
+    ///
+    ///     let temp_dir = TempDir::new().expect("unable to create temporary working directory");
+    ///     let mut kv = KvStore::open(temp_dir.path())?;
+    ///     kv.set("key".to_owned(), "1".to_owned())?;
+    ///     kv.remove("key".to_owned())?;
+    ///     assert_eq!(kv.get("key".to_owned())?, None);
+    /// #   Ok(())
     /// # }
     /// ```
     pub fn remove(&mut self, key: String) -> Result<()> {
