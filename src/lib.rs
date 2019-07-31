@@ -1,23 +1,22 @@
 #![deny(missing_docs)]
 //! Implements an in-memory key-value storage system.
+use failure::Error;
+use serde::{Deserialize, Serialize};
+use serde_cbor::{to_writer, Deserializer};
 use std::collections::HashMap;
-use std::error::Error;
-use std::fmt;
+use std::fs::File;
+use std::fs::OpenOptions;
+use std::io::{Seek, SeekFrom};
 use std::path::Path;
 
-#[derive(Debug)]
-struct CustomErr;
-
-impl fmt::Display for CustomErr {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        panic!();
-    }
-}
-
-impl Error for CustomErr {}
-
 /// Custom Result type used for KvStore operations.
-pub type Result<T> = std::result::Result<T, Box<dyn Error>>;
+pub type Result<T> = std::result::Result<T, Error>;
+
+#[derive(Debug, Serialize, Deserialize)]
+enum Command {
+    Set { key: String, value: String },
+    Remove { key: String },
+}
 
 /// Key-value store for storing strings.
 /// rust ```
@@ -29,17 +28,19 @@ pub type Result<T> = std::result::Result<T, Box<dyn Error>>;
 ///     assert_eq!(kv.get("a".to_owned()), Some("b".to_owned()));
 /// # }
 /// ```
-pub struct KvStore(HashMap<String, String>);
+pub struct KvStore {
+    file: File,
+}
 
 impl KvStore {
-    /// Creates an empty KvStore
-    pub fn new() -> Self {
-        Self(HashMap::new())
-    }
-
     /// Loads the in-memory index of the storage from a file to construct a KvStore
     pub fn open(path: &Path) -> Result<Self> {
-        Ok(Self::new())
+        let file = OpenOptions::new()
+            .append(true)
+            .create(true)
+            .read(true)
+            .open(path.join("kvs.cbor"))?;
+        Ok(Self { file })
     }
 
     /// Maps a key in the storage to a specific value.
@@ -53,15 +54,31 @@ impl KvStore {
     ///     assert_eq!(kv.get("key".to_owned()), Some("2".to_owned()));
     /// # }
     /// ```
-    pub fn set(&mut self, key: String, val: String) -> Result<()> {
-        self.0.insert(key, val);
+    pub fn set(&mut self, key: String, value: String) -> Result<()> {
+        let cmd = Command::Set { key, value };
+        to_writer(&mut self.file, &cmd)?;
         Ok(())
+    }
+
+    fn build_index(&mut self) -> Result<HashMap<String, String>> {
+        self.file.seek(SeekFrom::Start(0))?;
+        let mut map = HashMap::new();
+        let de = Deserializer::from_reader(&self.file);
+        for cmd in de.into_iter() {
+            dbg!(&cmd);
+            match cmd? {
+                Command::Set { key, value } => map.insert(key, value),
+                Command::Remove { key } => map.remove(&key),
+            };
+        }
+        Ok(map)
     }
 
     /// Returns a copy of the value mapped to a given key if it exists.
     /// Otherwise, return None.
-    pub fn get(&self, key: String) -> Result<Option<String>> {
-        Ok(self.0.get(&key).cloned())
+    pub fn get(&mut self, key: String) -> Result<Option<String>> {
+        let mut map = self.build_index()?;
+        Ok(map.remove(&key))
     }
 
     /// Removes a key and its value from the storage.
@@ -76,7 +93,13 @@ impl KvStore {
     /// # }
     /// ```
     pub fn remove(&mut self, key: String) -> Result<()> {
-        self.0.remove(&key);
-        Ok(())
+        let map = self.build_index()?;
+        if map.contains_key(&key) {
+            let cmd = Command::Remove { key };
+            to_writer(&mut self.file, &cmd)?;
+            Ok(())
+        } else {
+            Err(failure::err_msg("Key not found"))
+        }
     }
 }
