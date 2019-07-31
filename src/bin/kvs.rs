@@ -1,3 +1,4 @@
+use kvs::KeyNotFound;
 use kvs::KvStore;
 use kvs::Result;
 use std::env::current_dir;
@@ -26,7 +27,18 @@ pub fn main() -> Result<()> {
             None => println!("Key not found"),
         },
         Args::Set { key, value } => kvs.set(key, value)?,
-        Args::Remove { key } => kvs.remove(key)?,
+        Args::Remove { key } => {
+            let res = kvs.remove(key);
+            if let Err(err) = res {
+                match err.downcast::<KeyNotFound>() {
+                    Ok(e) => {
+                        println!("{}", e);
+                        std::process::exit(1);
+                    }
+                    Err(e) => return Err(e),
+                }
+            }
+        }
     };
 
     Ok(())
