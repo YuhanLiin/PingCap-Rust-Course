@@ -39,6 +39,23 @@ impl Command {
     }
 }
 
+// Exclusive range with len method for u64, unlike the one from std
+#[derive(Debug, Clone)]
+struct Range {
+    start: u64,
+    end: u64,
+}
+
+impl Range {
+    fn new(start: u64, end: u64) -> Self {
+        Self { start, end }
+    }
+
+    fn len(&self) -> u64 {
+        self.end - self.start
+    }
+}
+
 const COMPACTION_THRESHOLD: u64 = 1024 * 1024;
 
 /// Key-value store for storing strings.
@@ -57,10 +74,15 @@ const COMPACTION_THRESHOLD: u64 = 1024 * 1024;
 /// # }
 /// ```
 pub struct KvStore {
+    // Directory where the data file is stored.
     dir: PathBuf,
+    // Read and write handles to the data file. Must always point to kvs.cbor file in self.dir.
     reader: BufReader<File>,
     writer: BufWriter<File>,
-    index: Option<HashMap<String, u64>>,
+    // Mapping between key to log file offset to make lookups faster
+    index: HashMap<String, Range>,
+    // Number of bytes taken up by stale commands
+    stale_bytes: u64,
 }
 
 impl KvStore {
@@ -91,39 +113,55 @@ impl KvStore {
             .open(&log_path)?;
         let read_file = OpenOptions::new().read(true).open(&log_path)?;
 
-        Ok(Self {
+        let mut out = Self {
             reader: BufReader::new(read_file),
             writer: BufWriter::new(write_file),
-            index: None,
+            index: HashMap::new(),
             dir: dir.to_owned(),
-        })
+            stale_bytes: 0,
+        };
+        out.build_index()?;
+        Ok(out)
     }
 
     fn compaction(&mut self) -> Result<()> {
         let log_path = Self::log_path(&self.dir);
         let compact_path = Self::compacted_log_path(&self.dir);
-        let index = self.build_index()?;
-        let mut compact_file = OpenOptions::new()
-            .append(true)
-            .create_new(true)
-            .open(&compact_path)?;
+        let mut compact_file = BufWriter::new(
+            OpenOptions::new()
+                .append(true)
+                .create_new(true)
+                .open(&compact_path)?,
+        );
 
-        let offsets = index.values().cloned().collect::<Vec<_>>();
-        // Use our updated index to figure out what data is fresh
-        for offset in offsets {
-            self.reader.seek(SeekFrom::Start(offset))?;
+        // The following operations modify multiple object state, and failure at any point must
+        // guarantee a consistent object state (reader, writer, index all refer to same file).
+        // Also, even on a panic the disc data we care about must not be corrupted.
+
+        let mut new_index = self.index.clone();
+        // Use our index to figure out what data is fresh
+        for (key, offset) in self.index.iter() {
+            self.reader.seek(SeekFrom::Start(offset.start))?;
             let mut de = Deserializer::from_reader(&mut self.reader);
             let cmd: Command = serde::de::Deserialize::deserialize(&mut de).expect("bad offset");
+
+            let new_offset = compact_file.seek(SeekFrom::Current(0))?;
             to_writer(&mut compact_file, &cmd)?;
+            // Update new index with offsets in the new file
+            *new_index.get_mut(key).unwrap() = Range::new(new_offset, new_offset + offset.len());
         }
 
-        // Don't risk an outdated index
-        self.index = None;
         // Replace current active log with compacted log
         rename(&compact_path, &log_path)?;
-        // Uphold invariant that file handles should always point to latest kvs.cbor file
-        self.writer = BufWriter::new(OpenOptions::new().append(true).open(&log_path)?);
-        self.reader = BufReader::new(OpenOptions::new().read(true).open(&log_path)?);
+
+        *self = Self {
+            writer: BufWriter::new(OpenOptions::new().append(true).open(&log_path)?),
+            reader: BufReader::new(OpenOptions::new().read(true).open(&log_path)?),
+            index: new_index,
+            dir: self.dir.clone(),
+            stale_bytes: 0,
+        };
+        // Uphold invariant that file handles should always point to latest kvs.cbor file.
         Ok(())
     }
 
@@ -146,60 +184,66 @@ impl KvStore {
     /// ```
     pub fn set(&mut self, key: String, value: String) -> Result<()> {
         let cmd = Command::Set { key, value };
+
         // Get the offset of the next command
+        let start = self.writer.seek(SeekFrom::End(0))?;
+        to_writer(&mut self.writer, &cmd)?;
         let end = self.writer.seek(SeekFrom::End(0))?;
 
-        if let Some(index) = &mut self.index {
-            to_writer(&mut self.writer, &cmd)?;
-            // Insert the offset into the index
-            index.insert(cmd.key(), end);
-        } else {
-            to_writer(&mut self.writer, &cmd)?;
+        // Insert the offset into the index
+        if self
+            .index
+            .insert(cmd.key(), Range::new(start, end))
+            .is_some()
+        {
+            self.stale_bytes += end - start;
         }
         self.writer.flush()?;
 
-        if end > COMPACTION_THRESHOLD {
+        if self.stale_bytes > COMPACTION_THRESHOLD {
             self.compaction()?;
         }
 
         Ok(())
     }
 
-    fn build_index(&mut self) -> Result<&mut HashMap<String, u64>> {
-        if self.index.is_none() {
-            // Read from beginning
-            self.reader.seek(SeekFrom::Start(0))?;
-            let mut map = HashMap::new();
+    fn build_index(&mut self) -> Result<()> {
+        // Read from beginning
+        let mut start = self.reader.seek(SeekFrom::Start(0))?;
+        self.index = HashMap::new();
 
-            // Check if EOF has been reached
-            while !self.reader.fill_buf()?.is_empty() {
-                // Get current offset. Doesn't actually change file offset.
-                // For some reason calling byte_offset() on CBOR deserializers does not work for
-                // files, so we have to get log offsets using seek() instead.
-                let offset = self.reader.seek(SeekFrom::Current(0))?;
-                // Deserialize command manually
-                let mut de = Deserializer::from_reader(&mut self.reader);
-                let cmd = serde::de::Deserialize::deserialize(&mut de)?;
+        // Check if EOF has been reached
+        while !self.reader.fill_buf()?.is_empty() {
+            // For some reason calling byte_offset() on CBOR deserializers does not work for
+            // files, so we have to get log offsets using seek() instead.
+            // Deserialize command manually
+            let mut de = Deserializer::from_reader(&mut self.reader);
+            let cmd = serde::de::Deserialize::deserialize(&mut de)?;
+            let end = self.reader.seek(SeekFrom::Current(0))?;
 
-                match cmd {
-                    Command::Set { key, .. } => map.insert(key, offset),
-                    Command::Remove { key } => map.remove(&key),
-                };
-            }
+            match cmd {
+                Command::Set { key, .. } => {
+                    if let Some(old_offset) = self.index.insert(key, Range::new(start, end)) {
+                        self.stale_bytes += old_offset.len();
+                    }
+                }
+                Command::Remove { key } => {
+                    self.stale_bytes +=
+                        self.index.remove(&key).expect("removed not in index").len();
+                }
+            };
 
-            self.index = Some(map);
+            start = end;
         }
 
-        Ok(self.index.as_mut().unwrap())
+        Ok(())
     }
 
     /// Returns a copy of the value mapped to a given key if it exists.
     /// Otherwise, return None.
     pub fn get(&mut self, key: String) -> Result<Option<String>> {
-        let map = self.build_index()?;
-
-        if let Some(offset) = map.get(&key).cloned() {
-            self.reader.seek(SeekFrom::Start(offset))?;
+        if let Some(offset) = self.index.get(&key).cloned() {
+            self.reader.seek(SeekFrom::Start(offset.start))?;
             let mut de = Deserializer::from_reader(&mut self.reader);
             let cmd: Command = serde::de::Deserialize::deserialize(&mut de).expect("bad offset");
             Ok(Some(cmd.value()))
@@ -226,13 +270,15 @@ impl KvStore {
     /// # }
     /// ```
     pub fn remove(&mut self, key: String) -> Result<()> {
-        let map = self.build_index()?;
-
-        if map.contains_key(&key) {
+        if self.index.contains_key(&key) {
             let cmd = Command::Remove { key };
             to_writer(&mut self.writer, &cmd)?;
             // Remove key from index AFTER committing the command to disc
-            self.index.as_mut().unwrap().remove(&cmd.key());
+            self.stale_bytes += self
+                .index
+                .remove(&cmd.key())
+                .expect("removed not in index")
+                .len();
             Ok(())
         } else {
             Err(KeyNotFound.into())
