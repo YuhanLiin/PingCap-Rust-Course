@@ -5,7 +5,8 @@ use serde::{Deserialize, Serialize};
 use serde_cbor::{to_writer, Deserializer};
 use std::collections::HashMap;
 use std::fs::{remove_file, rename, File, OpenOptions};
-use std::io::{ErrorKind, Seek, SeekFrom};
+use std::io::prelude::*;
+use std::io::{BufReader, BufWriter, ErrorKind, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
 /// Custom Result type used for KvStore operations.
@@ -57,7 +58,8 @@ const COMPACTION_THRESHOLD: u64 = 1024 * 1024;
 /// ```
 pub struct KvStore {
     dir: PathBuf,
-    file: File,
+    reader: BufReader<File>,
+    writer: BufWriter<File>,
     index: Option<HashMap<String, u64>>,
 }
 
@@ -83,14 +85,15 @@ impl KvStore {
             }
         };
 
-        let file = OpenOptions::new()
+        let write_file = OpenOptions::new()
             .append(true)
-            .read(true)
             .create(true)
             .open(&log_path)?;
+        let read_file = OpenOptions::new().read(true).open(&log_path)?;
 
         Ok(Self {
-            file,
+            reader: BufReader::new(read_file),
+            writer: BufWriter::new(write_file),
             index: None,
             dir: dir.to_owned(),
         })
@@ -102,15 +105,14 @@ impl KvStore {
         let index = self.build_index()?;
         let mut compact_file = OpenOptions::new()
             .append(true)
-            .read(true)
             .create_new(true)
             .open(&compact_path)?;
 
         let offsets = index.values().cloned().collect::<Vec<_>>();
         // Use our updated index to figure out what data is fresh
         for offset in offsets {
-            self.file.seek(SeekFrom::Start(offset))?;
-            let mut de = Deserializer::from_reader(&self.file);
+            self.reader.seek(SeekFrom::Start(offset))?;
+            let mut de = Deserializer::from_reader(&mut self.reader);
             let cmd: Command = serde::de::Deserialize::deserialize(&mut de).expect("bad offset");
             to_writer(&mut compact_file, &cmd)?;
         }
@@ -119,8 +121,9 @@ impl KvStore {
         self.index = None;
         // Replace current active log with compacted log
         rename(&compact_path, &log_path)?;
-        // Uphold invariant that self.file should always point to latest kvs.cbor file
-        self.file = OpenOptions::new().append(true).read(true).open(&log_path)?;
+        // Uphold invariant that file handles should always point to latest kvs.cbor file
+        self.writer = BufWriter::new(OpenOptions::new().append(true).open(&log_path)?);
+        self.reader = BufReader::new(OpenOptions::new().read(true).open(&log_path)?);
         Ok(())
     }
 
@@ -144,15 +147,16 @@ impl KvStore {
     pub fn set(&mut self, key: String, value: String) -> Result<()> {
         let cmd = Command::Set { key, value };
         // Get the offset of the next command
-        let end = self.file.seek(SeekFrom::End(0))?;
+        let end = self.writer.seek(SeekFrom::End(0))?;
 
         if let Some(index) = &mut self.index {
-            to_writer(&mut self.file, &cmd)?;
+            to_writer(&mut self.writer, &cmd)?;
             // Insert the offset into the index
             index.insert(cmd.key(), end);
         } else {
-            to_writer(&mut self.file, &cmd)?;
+            to_writer(&mut self.writer, &cmd)?;
         }
+        self.writer.flush()?;
 
         if end > COMPACTION_THRESHOLD {
             self.compaction()?;
@@ -164,24 +168,23 @@ impl KvStore {
     fn build_index(&mut self) -> Result<&mut HashMap<String, u64>> {
         if self.index.is_none() {
             // Read from beginning
-            self.file.seek(SeekFrom::Start(0))?;
-
-            let mut cloned_file = self.file.try_clone()?;
-            let mut cmds = Deserializer::from_reader(&self.file).into_iter();
+            self.reader.seek(SeekFrom::Start(0))?;
             let mut map = HashMap::new();
 
-            loop {
-                // Get current offset. Doesn't actually change file offset
-                let offset = cloned_file.seek(SeekFrom::Current(0))?;
+            // Check if EOF has been reached
+            while !self.reader.fill_buf()?.is_empty() {
+                // Get current offset. Doesn't actually change file offset.
+                // For some reason calling byte_offset() on CBOR deserializers does not work for
+                // files, so we have to get log offsets using seek() instead.
+                let offset = self.reader.seek(SeekFrom::Current(0))?;
+                // Deserialize command manually
+                let mut de = Deserializer::from_reader(&mut self.reader);
+                let cmd = serde::de::Deserialize::deserialize(&mut de)?;
 
-                if let Some(cmd) = cmds.next() {
-                    match cmd? {
-                        Command::Set { key, .. } => map.insert(key, offset),
-                        Command::Remove { key } => map.remove(&key),
-                    };
-                } else {
-                    break;
-                }
+                match cmd {
+                    Command::Set { key, .. } => map.insert(key, offset),
+                    Command::Remove { key } => map.remove(&key),
+                };
             }
 
             self.index = Some(map);
@@ -196,8 +199,8 @@ impl KvStore {
         let map = self.build_index()?;
 
         if let Some(offset) = map.get(&key).cloned() {
-            self.file.seek(SeekFrom::Start(offset))?;
-            let mut de = Deserializer::from_reader(&self.file);
+            self.reader.seek(SeekFrom::Start(offset))?;
+            let mut de = Deserializer::from_reader(&mut self.reader);
             let cmd: Command = serde::de::Deserialize::deserialize(&mut de).expect("bad offset");
             Ok(Some(cmd.value()))
         } else {
@@ -227,7 +230,7 @@ impl KvStore {
 
         if map.contains_key(&key) {
             let cmd = Command::Remove { key };
-            to_writer(&mut self.file, &cmd)?;
+            to_writer(&mut self.writer, &cmd)?;
             // Remove key from index AFTER committing the command to disc
             self.index.as_mut().unwrap().remove(&cmd.key());
             Ok(())
