@@ -56,6 +56,9 @@ impl Range {
     }
 }
 
+/// Interface for key-value store backend
+pub trait KvsEngine {}
+
 const COMPACTION_THRESHOLD: u64 = 1024 * 1024;
 
 /// Key-value store for storing strings.
