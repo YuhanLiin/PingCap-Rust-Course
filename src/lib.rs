@@ -2,7 +2,7 @@
 //! Implements an in-memory key-value storage system.
 use failure::{Error, Fail};
 use serde::{Deserialize, Serialize};
-use serde_cbor::{to_writer, Deserializer};
+use serde_cbor::{from_reader, to_writer, Deserializer};
 use std::collections::HashMap;
 use std::fs::{remove_file, rename, File, OpenOptions};
 use std::io::prelude::*;
@@ -11,6 +11,44 @@ use std::path::{Path, PathBuf};
 
 /// Custom Result type used for KvStore operations.
 pub type Result<T> = std::result::Result<T, Error>;
+
+/// Defines the network protocol for communicating between server and client
+pub mod protocol {
+    use super::*;
+
+    #[allow(missing_docs)]
+    pub const GET: &str = "get";
+    #[allow(missing_docs)]
+    pub const SET: &str = "set";
+    #[allow(missing_docs)]
+    pub const REMOVE: &str = "remove";
+
+    /// Representation of a message sent over TCP between server and client
+    /// Transmitted over the network in the form of CBOR messages
+    #[derive(Debug, Serialize, Deserialize)]
+    #[serde(tag = "t", content = "c")]
+    pub enum Message {
+        /// List of strings used to represent commands and return values
+        #[serde(rename = "a")]
+        Array(Vec<String>),
+        #[serde(rename = "e")]
+        /// Error message inidicating failure
+        Error(String),
+    }
+
+    impl Message {
+        /// Serialize a message from a Reader
+        pub fn read(reader: impl Read) -> Result<Self> {
+            Ok(from_reader(reader)?)
+        }
+
+        /// Deserialize and send the message to a Writer
+        pub fn write(&self, writer: impl Write) -> Result<()> {
+            to_writer(writer, &self)?;
+            Ok(())
+        }
+    }
+}
 
 /// Error thrown by remove() when the key does not exist
 #[derive(Debug, Fail)]

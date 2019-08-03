@@ -2,7 +2,7 @@ use kvs::KeyNotFound;
 use kvs::KvStore;
 use kvs::Result;
 use std::env::current_dir;
-use std::net::IpAddr;
+use std::net::SocketAddr;
 use structopt::StructOpt;
 
 #[derive(StructOpt)]
@@ -10,8 +10,8 @@ use structopt::StructOpt;
 struct Args {
     #[structopt(subcommand)]
     sub: SubCommand,
-    #[structopt(long = "--addr")]
-    ip_addr: Option<IpAddr>,
+    #[structopt(long = "addr")]
+    addr: Option<SocketAddr>,
 }
 
 #[derive(StructOpt)]

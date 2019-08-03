@@ -13,6 +13,8 @@ serde_cbor = "0.10.1"
 ron = "*"
 bson = "0.13"
 failure = "0.1.5"
+stderrlog = "0.4.1"
+log = "0.4"
 
 [dev-dependencies]
 assert_cmd = "0.11.0"
