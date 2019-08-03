@@ -98,7 +98,49 @@ impl Range {
 }
 
 /// Interface for key-value store backend
-pub trait KvsEngine {}
+pub trait KvsEngine {
+    /// Maps a key in the storage to a specific value.
+    /// Overwrites previous value if the key already exists.
+    /// ```
+    /// use kvs::Result;
+    ///
+    /// # fn main() -> Result<()> {
+    ///     use kvs::{KvsEngine, KvStore};
+    ///     use tempfile::TempDir;
+    ///
+    ///     let temp_dir = TempDir::new().expect("unable to create temporary working directory");
+    ///     let mut kv = KvStore::open(temp_dir.path())?;
+    ///     kv.set("key".to_owned(), "1".to_owned())?;
+    ///     kv.set("key".to_owned(), "2".to_owned())?;
+    ///     assert_eq!(kv.get("key".to_owned())?, Some("2".to_owned()));
+    /// #   Ok(())
+    /// # }
+    /// ```
+    fn set(&mut self, key: String, value: String) -> Result<()>;
+
+    /// Returns a copy of the value mapped to a given key if it exists.
+    /// Otherwise, return None.
+    fn get(&mut self, key: String) -> Result<Option<String>>;
+
+    /// Removes a key and its value from the storage.
+    /// Does nothing if the key is not present in the storage.
+    /// ```
+    /// use kvs::Result;
+    ///
+    /// # fn main() -> Result<()> {
+    ///     use kvs::{KvsEngine, KvStore};
+    ///     use tempfile::TempDir;
+    ///
+    ///     let temp_dir = TempDir::new().expect("unable to create temporary working directory");
+    ///     let mut kv = KvStore::open(temp_dir.path())?;
+    ///     kv.set("key".to_owned(), "1".to_owned())?;
+    ///     kv.remove("key".to_owned())?;
+    ///     assert_eq!(kv.get("key".to_owned())?, None);
+    /// #   Ok(())
+    /// # }
+    /// ```
+    fn remove(&mut self, key: String) -> Result<()>;
+}
 
 const COMPACTION_THRESHOLD: u64 = 1024 * 1024;
 
@@ -108,7 +150,7 @@ const COMPACTION_THRESHOLD: u64 = 1024 * 1024;
 ///
 /// # fn main() -> Result<()> {
 ///     use tempfile::TempDir;
-///     use kvs::KvStore;
+///     use kvs::{KvsEngine, KvStore};
 ///
 ///     let temp_dir = TempDir::new().expect("unable to create temporary working directory");
 ///     let mut kv = KvStore::open(temp_dir.path())?;
@@ -210,49 +252,6 @@ impl KvStore {
         Ok(())
     }
 
-    /// Maps a key in the storage to a specific value.
-    /// Overwrites previous value if the key already exists.
-    /// ```
-    /// use kvs::Result;
-    ///
-    /// # fn main() -> Result<()> {
-    ///     use kvs::KvStore;
-    ///     use tempfile::TempDir;
-    ///
-    ///     let temp_dir = TempDir::new().expect("unable to create temporary working directory");
-    ///     let mut kv = KvStore::open(temp_dir.path())?;
-    ///     kv.set("key".to_owned(), "1".to_owned())?;
-    ///     kv.set("key".to_owned(), "2".to_owned())?;
-    ///     assert_eq!(kv.get("key".to_owned())?, Some("2".to_owned()));
-    /// #   Ok(())
-    /// # }
-    /// ```
-    pub fn set(&mut self, key: String, value: String) -> Result<()> {
-        let cmd = Command::Set { key, value };
-
-        // Get the offset of the next command
-        let start = self.writer.seek(SeekFrom::End(0))?;
-        to_writer(&mut self.writer, &cmd)?;
-        self.writer.flush()?;
-        let end = self.writer.seek(SeekFrom::End(0))?;
-
-        // Insert the offset into the index
-        if self
-            .index
-            .insert(cmd.key(), Range::new(start, end))
-            .is_some()
-        {
-            self.stale_bytes += end - start;
-        }
-        self.writer.flush()?;
-
-        if self.stale_bytes > COMPACTION_THRESHOLD {
-            self.compaction()?;
-        }
-
-        Ok(())
-    }
-
     fn build_index(&mut self) -> Result<()> {
         // Read from beginning
         let mut start = self.reader.seek(SeekFrom::Start(0))?;
@@ -284,10 +283,10 @@ impl KvStore {
 
         Ok(())
     }
+}
 
-    /// Returns a copy of the value mapped to a given key if it exists.
-    /// Otherwise, return None.
-    pub fn get(&mut self, key: String) -> Result<Option<String>> {
+impl KvsEngine for KvStore {
+    fn get(&mut self, key: String) -> Result<Option<String>> {
         if let Some(offset) = self.index.get(&key).cloned() {
             self.reader.seek(SeekFrom::Start(offset.start))?;
             let mut de = Deserializer::from_reader(&mut self.reader);
@@ -298,24 +297,7 @@ impl KvStore {
         }
     }
 
-    /// Removes a key and its value from the storage.
-    /// Does nothing if the key is not present in the storage.
-    /// ```
-    /// use kvs::Result;
-    ///
-    /// # fn main() -> Result<()> {
-    ///     use kvs::KvStore;
-    ///     use tempfile::TempDir;
-    ///
-    ///     let temp_dir = TempDir::new().expect("unable to create temporary working directory");
-    ///     let mut kv = KvStore::open(temp_dir.path())?;
-    ///     kv.set("key".to_owned(), "1".to_owned())?;
-    ///     kv.remove("key".to_owned())?;
-    ///     assert_eq!(kv.get("key".to_owned())?, None);
-    /// #   Ok(())
-    /// # }
-    /// ```
-    pub fn remove(&mut self, key: String) -> Result<()> {
+    fn remove(&mut self, key: String) -> Result<()> {
         if self.index.contains_key(&key) {
             let cmd = Command::Remove { key };
             to_writer(&mut self.writer, &cmd)?;
@@ -330,5 +312,64 @@ impl KvStore {
         } else {
             Err(KeyNotFound.into())
         }
+    }
+
+    fn set(&mut self, key: String, value: String) -> Result<()> {
+        let cmd = Command::Set { key, value };
+
+        // Get the offset of the next command
+        let start = self.writer.seek(SeekFrom::End(0))?;
+        to_writer(&mut self.writer, &cmd)?;
+        self.writer.flush()?;
+        let end = self.writer.seek(SeekFrom::End(0))?;
+
+        // Insert the offset into the index
+        if self
+            .index
+            .insert(cmd.key(), Range::new(start, end))
+            .is_some()
+        {
+            self.stale_bytes += end - start;
+        }
+        self.writer.flush()?;
+
+        if self.stale_bytes > COMPACTION_THRESHOLD {
+            self.compaction()?;
+        }
+
+        Ok(())
+    }
+}
+
+/// KvsEngine wrapper around sled DB engine
+pub struct SledKvsEngine(sled::Db);
+
+impl SledKvsEngine {
+    /// Creates or loads sled database at specified path using default configuration
+    pub fn open(path: &Path) -> Result<Self> {
+        Ok(Self(sled::Db::start_default(path)?))
+    }
+}
+
+impl KvsEngine for SledKvsEngine {
+    fn get(&mut self, key: String) -> Result<Option<String>> {
+        let out = self.0.get(&key).map(|s| {
+            s.as_ref().map(|s| {
+                std::str::from_utf8(s)
+                    .expect("non-string in sled DB")
+                    .to_owned()
+            })
+        })?;
+        Ok(out)
+    }
+
+    fn set(&mut self, key: String, value: String) -> Result<()> {
+        self.0.set(&key, sled::IVec::from(&value[..]))?;
+        Ok(())
+    }
+
+    fn remove(&mut self, key: String) -> Result<()> {
+        self.0.del(&key)?;
+        Ok(())
     }
 }
