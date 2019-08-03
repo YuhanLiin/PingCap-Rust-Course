@@ -1,6 +1,7 @@
 use failure::{ensure, format_err};
 use kvs::{protocol, KvStore, Result};
 use log::info;
+use std::io::Write;
 use std::net::{SocketAddr, TcpListener};
 use stderrlog;
 use structopt::StructOpt;
@@ -53,6 +54,7 @@ fn run_server(config: &Config) -> Result<()> {
     for stream in listener.incoming() {
         let mut stream = stream?;
         let msg = protocol::Message::read(&mut stream)?;
+        info!("Finished reading request from stream");
 
         let resp = match handle_request(msg, &mut store) {
             Ok(value) => {
@@ -66,6 +68,8 @@ fn run_server(config: &Config) -> Result<()> {
             }
         };
         resp.write(&mut stream)?;
+        stream.flush()?;
+        info!("Finished writing response to stream");
     }
     Ok(())
 }
