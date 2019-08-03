@@ -1,5 +1,5 @@
 use failure::{ensure, format_err};
-use kvs::{protocol, Result};
+use kvs::{protocol, KvStore, Result};
 use log::info;
 use std::net::{SocketAddr, TcpListener};
 use stderrlog;
@@ -33,14 +33,14 @@ fn main() -> Result<()> {
     let args = Args::from_args();
     let config: Config = args.into();
 
-    info!("Version {}", env!("CARGO_PKG_VERSION"));
-    info!("Engine: {}", config.engine);
-    info!("Socket Address: {}", config.addr);
-
     stderrlog::new()
         .module(module_path!())
         .verbosity(3)
         .init()?;
+
+    info!("Version {}", env!("CARGO_PKG_VERSION"));
+    info!("Engine: {}", config.engine);
+    info!("Socket Address: {}", config.addr);
 
     run_server(&config)
 }
@@ -48,14 +48,16 @@ fn main() -> Result<()> {
 fn run_server(config: &Config) -> Result<()> {
     let listener = TcpListener::bind(&config.addr)?;
     info!("Bind to {}", config.addr);
+    let mut store = KvStore::open(&std::env::current_dir()?)?;
+
     for stream in listener.incoming() {
         let mut stream = stream?;
         let msg = protocol::Message::read(&mut stream)?;
 
-        let resp = match handle_request(msg) {
+        let resp = match handle_request(msg, &mut store) {
             Ok(value) => {
-                info!("Request SUCCESS, reply: {}", value);
-                protocol::Message::Array(vec![value])
+                info!("Request SUCCESS, reply: {}", value.join(" "));
+                protocol::Message::Array(value)
             }
             Err(err) => {
                 let err = err.as_fail().to_string();
@@ -68,22 +70,49 @@ fn run_server(config: &Config) -> Result<()> {
     Ok(())
 }
 
-fn handle_request(msg: protocol::Message) -> Result<String> {
+fn handle_request(msg: protocol::Message, store: &mut KvStore) -> Result<Vec<String>> {
     match msg {
-        protocol::Message::Array(mut arr) => {
+        protocol::Message::Array(arr) => {
             info!("Received TCP args: {}", arr.join(" "));
-            ensure!(
-                arr.len() == 2,
-                "server received {} args, expected 2",
-                arr.len()
-            );
 
-            let key = arr.pop();
-            // TODO Handle other stuff
-            Ok("placeholder".to_owned())
+            match arr.get(0).map(|s| &s[..]) {
+                Some(protocol::GET) => {
+                    check_len(&arr, 2)?;
+                    let key = &arr[1];
+                    // If value does not exist, return empty list
+                    Ok(store
+                        .get(key.to_owned())?
+                        .map(|val| vec![val])
+                        .unwrap_or(Vec::new()))
+                }
+
+                Some(protocol::SET) => {
+                    check_len(&arr, 3)?;
+                    let (key, value) = (&arr[1], &arr[2]);
+                    store.set(key.to_owned(), value.to_owned())?;
+                    Ok(vec!["Ok".to_owned()])
+                }
+
+                Some(protocol::REMOVE) => {
+                    check_len(&arr, 2)?;
+                    let key = &arr[1];
+                    store.remove(key.to_owned())?;
+                    Ok(vec!["Ok".to_owned()])
+                }
+
+                _ => Err(format_err!("invalid incoming message")),
+            }
         }
-        protocol::Message::Error(err) => {
-            Err(format_err!("unexpected received error message: {}", err))
-        }
+        protocol::Message::Error(err) => Err(format_err!("received error message {}", err)),
     }
+}
+
+fn check_len(arr: &[String], expected: usize) -> Result<()> {
+    ensure!(
+        arr.len() == expected,
+        "server received {} args, expected {}",
+        arr.len(),
+        expected
+    );
+    Ok(())
 }

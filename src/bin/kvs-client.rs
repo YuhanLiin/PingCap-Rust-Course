@@ -1,8 +1,7 @@
-use kvs::KeyNotFound;
-use kvs::KvStore;
+use failure::{ensure, format_err};
+use kvs::protocol;
 use kvs::Result;
-use std::env::current_dir;
-use std::net::SocketAddr;
+use std::net::{SocketAddr, TcpStream};
 use structopt::StructOpt;
 
 #[derive(StructOpt)]
@@ -28,26 +27,30 @@ enum SubCommand {
 
 fn main() -> Result<()> {
     let args = Args::from_args();
-    let mut kvs = KvStore::open(&current_dir()?)?;
 
-    match args.sub {
-        SubCommand::Get { key } => match kvs.get(key)? {
-            Some(value) => println!("{}", value),
-            None => println!("Key not found"),
-        },
-        SubCommand::Set { key, value } => kvs.set(key, value)?,
-        SubCommand::Remove { key } => {
-            let res = kvs.remove(key);
-            if let Err(err) = res {
-                match err.downcast::<KeyNotFound>() {
-                    Ok(e) => {
-                        println!("{}", e);
-                        std::process::exit(1);
-                    }
-                    Err(e) => return Err(e),
-                }
-            }
+    let addr = args.addr.unwrap_or("127.0.0.1:4000".parse().unwrap());
+    let mut stream = TcpStream::connect(addr)?;
+
+    let req_args = match args.sub {
+        SubCommand::Get { key } => vec![protocol::GET.to_owned(), key],
+        SubCommand::Set { key, value } => vec![protocol::SET.to_owned(), key, value],
+        SubCommand::Remove { key } => vec![protocol::REMOVE.to_owned(), key],
+    };
+    let req = protocol::Message::Array(req_args);
+
+    req.write(&mut stream)?;
+
+    let resp = protocol::Message::read(&mut stream)?;
+    match resp {
+        protocol::Message::Array(arr) => {
+            ensure!(
+                arr.len() == 1,
+                "unexpected server output: {}",
+                arr.join(" ")
+            );
+            println!("Value = {}", arr[0]);
         }
+        protocol::Message::Error(err) => return Err(format_err!("Error: {}", err)),
     };
 
     Ok(())
