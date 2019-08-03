@@ -34,6 +34,9 @@ pub mod protocol {
         #[serde(rename = "e")]
         /// Error message inidicating failure
         Error(String),
+        #[serde(rename = "n")]
+        /// Null value used to indicate values that are not found
+        Null,
     }
 
     impl Message {
@@ -191,6 +194,7 @@ impl KvStore {
             // Update new index with offsets in the new file
             *new_index.get_mut(key).unwrap() = Range::new(new_offset, new_offset + offset.len());
         }
+        compact_file.flush()?;
 
         // Replace current active log with compacted log
         rename(&compact_path, &log_path)?;
@@ -229,6 +233,7 @@ impl KvStore {
         // Get the offset of the next command
         let start = self.writer.seek(SeekFrom::End(0))?;
         to_writer(&mut self.writer, &cmd)?;
+        self.writer.flush()?;
         let end = self.writer.seek(SeekFrom::End(0))?;
 
         // Insert the offset into the index
@@ -314,6 +319,7 @@ impl KvStore {
         if self.index.contains_key(&key) {
             let cmd = Command::Remove { key };
             to_writer(&mut self.writer, &cmd)?;
+            self.writer.flush()?;
             // Remove key from index AFTER committing the command to disc
             self.stale_bytes += self
                 .index

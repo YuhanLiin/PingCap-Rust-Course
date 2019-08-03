@@ -1,7 +1,6 @@
 use failure::{ensure, format_err};
 use kvs::protocol;
 use kvs::Result;
-use std::io::Write;
 use std::net::{Shutdown, SocketAddr, TcpStream};
 use structopt::StructOpt;
 
@@ -51,13 +50,18 @@ fn main() -> Result<()> {
     let resp = protocol::Message::read(&mut stream)?;
     match resp {
         protocol::Message::Array(arr) => {
-            ensure!(
-                arr.len() == 1,
-                "unexpected server output: {}",
-                arr.join(" ")
-            );
-            println!("{}", arr[0]);
+            // Empty array means output of nothing, so we don't print
+            if !arr.is_empty() {
+                ensure!(
+                    arr.len() == 1,
+                    "unexpected server output: {}",
+                    arr.join(" ")
+                );
+
+                println!("{}", arr[0]);
+            }
         }
+        protocol::Message::Null => println!("Key not found\n"),
         protocol::Message::Error(err) => return Err(format_err!("Error: {}", err)),
     };
 
