@@ -24,3 +24,7 @@ tempfile = "3.0.7"
 walkdir = "2.2.7"
 criterion = "0.2.11"
 rand = "0.6.5"
+
+[[bench]]
+name = "kvs_engine"
+harness = false

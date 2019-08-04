@@ -354,22 +354,21 @@ impl SledKvsEngine {
 impl KvsEngine for SledKvsEngine {
     fn get(&mut self, key: String) -> Result<Option<String>> {
         let out = self.0.get(&key).map(|s| {
-            s.as_ref().map(|s| {
-                std::str::from_utf8(s)
-                    .expect("non-string in sled DB")
-                    .to_owned()
-            })
+            s.as_ref()
+                .map(|s| String::from_utf8(s.to_vec()).expect("non-string in sled DB"))
         })?;
         Ok(out)
     }
 
     fn set(&mut self, key: String, value: String) -> Result<()> {
-        self.0.set(&key, sled::IVec::from(&value[..]))?;
+        self.0.set(&key, value.into_bytes())?;
+        self.0.flush()?;
         Ok(())
     }
 
     fn remove(&mut self, key: String) -> Result<()> {
-        self.0.del(&key)?;
+        self.0.del(&key)?.ok_or(KeyNotFound)?;
+        self.0.flush()?;
         Ok(())
     }
 }
