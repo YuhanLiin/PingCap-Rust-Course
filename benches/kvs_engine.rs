@@ -7,7 +7,7 @@ static WRITE_SEED: u64 = 12345;
 static READ_SEED: u64 = 67890;
 
 fn gen_string(rng: &mut impl Rng) -> String {
-    let len = rng.gen_range(1, 100000);
+    let len = rng.gen_range(1, 1000);
     (0..len).map(|_| rng.sample(Alphanumeric)).collect()
 }
 
@@ -32,7 +32,7 @@ fn write_loop(store: &mut impl KvsEngine, data: Vec<(String, String)>) {
 fn gen_read_data() -> Vec<String> {
     let mut rng: StdRng = SeedableRng::seed_from_u64(READ_SEED);
 
-    (0..1000).map(|_| gen_string(&mut rng)).collect()
+    (0..100).map(|_| gen_string(&mut rng)).collect()
 }
 
 fn read_loop(store: &mut impl KvsEngine, data: Vec<String>) {
