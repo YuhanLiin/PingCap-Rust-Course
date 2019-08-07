@@ -1,6 +1,7 @@
 use criterion::*;
 use kvs::{KvStore, KvsEngine, SledKvsEngine};
 use rand::{distributions::Alphanumeric, rngs::StdRng, Rng, SeedableRng};
+use std::path::Path;
 use tempfile::TempDir;
 
 static WRITE_SEED: u64 = 12345;
@@ -41,20 +42,25 @@ fn read_loop(store: &mut impl KvsEngine, data: Vec<String>) {
     }
 }
 
-fn new_kvs() -> KvStore {
-    KvStore::open(TempDir::new().expect("can't open tempdir").path()).expect("can't open kvs")
+fn new_kvs(path: &Path) -> KvStore {
+    KvStore::open(path).expect("can't open kvs")
 }
 
-fn new_sled() -> SledKvsEngine {
-    SledKvsEngine::open(TempDir::new().expect("can't open tempdir").path()).expect("can't open kvs")
+fn new_sled(path: &Path) -> SledKvsEngine {
+    SledKvsEngine::open(path).expect("can't open sled")
 }
 
 fn write_bench_kvs(c: &mut Criterion) {
     let data = gen_write_data();
+    let temp = TempDir::new().expect("can't open tempdir");
 
     c.bench_function("write kvs", move |b| {
         b.iter_batched(
-            || (new_kvs(), data.clone()),
+            || {
+                let mut kvs = new_kvs(&temp.path());
+                kvs.clear().unwrap();
+                (kvs, data.clone())
+            },
             |(mut kvs, data)| write_loop(&mut kvs, data),
             BatchSize::SmallInput,
         )
@@ -63,11 +69,16 @@ fn write_bench_kvs(c: &mut Criterion) {
 
 fn write_bench_sled(c: &mut Criterion) {
     let data = gen_write_data();
+    let temp = TempDir::new().expect("can't open tempdir");
 
     c.bench_function("write sled", move |b| {
         b.iter_batched(
-            || (new_sled(), data.clone()),
-            |(mut sled, data)| write_loop(&mut sled, data),
+            || {
+                let mut sled = new_sled(&temp.path());
+                sled.clear().unwrap();
+                (sled, data.clone())
+            },
+            |(mut kvs, data)| write_loop(&mut kvs, data),
             BatchSize::SmallInput,
         )
     });
@@ -75,11 +86,13 @@ fn write_bench_sled(c: &mut Criterion) {
 
 fn read_bench_kvs(c: &mut Criterion) {
     let data = gen_read_data();
+    let temp = TempDir::new().expect("can't open tempdir");
 
     c.bench_function("read kvs", move |b| {
         b.iter_batched(
             || {
-                let mut kvs = new_kvs();
+                let mut kvs = new_kvs(&temp.path());
+                kvs.clear().unwrap();
                 // Write in the keys before reading them
                 let write_data = data.iter().cloned().map(|s| (s.clone(), s)).collect();
                 write_loop(&mut kvs, write_data);
@@ -93,11 +106,13 @@ fn read_bench_kvs(c: &mut Criterion) {
 
 fn read_bench_sled(c: &mut Criterion) {
     let data = gen_read_data();
+    let temp = TempDir::new().expect("can't open tempdir");
 
     c.bench_function("read sled", move |b| {
         b.iter_batched(
             || {
-                let mut sled = new_sled();
+                let mut sled = new_sled(&temp.path());
+                sled.clear().unwrap();
                 // Write in the keys before reading them
                 let write_data = data.iter().cloned().map(|s| (s.clone(), s)).collect();
                 write_loop(&mut sled, write_data);

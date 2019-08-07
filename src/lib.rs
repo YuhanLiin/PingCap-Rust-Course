@@ -140,6 +140,9 @@ pub trait KvsEngine {
     /// # }
     /// ```
     fn remove(&mut self, key: String) -> Result<()>;
+
+    /// Remove all keys and values and clears underlying disc space
+    fn clear(&mut self) -> Result<()>;
 }
 
 const COMPACTION_THRESHOLD: u64 = 1024 * 1024;
@@ -339,6 +342,14 @@ impl KvsEngine for KvStore {
 
         Ok(())
     }
+
+    fn clear(&mut self) -> Result<()> {
+        // Truncate the underlying file
+        self.writer.get_ref().set_len(0)?;
+        self.stale_bytes = 0;
+        self.index = HashMap::new();
+        Ok(())
+    }
 }
 
 /// KvsEngine wrapper around sled DB engine
@@ -369,6 +380,11 @@ impl KvsEngine for SledKvsEngine {
     fn remove(&mut self, key: String) -> Result<()> {
         self.0.del(&key)?.ok_or(KeyNotFound)?;
         self.0.flush()?;
+        Ok(())
+    }
+
+    fn clear(&mut self) -> Result<()> {
+        self.0.clear()?;
         Ok(())
     }
 }
