@@ -1,8 +1,7 @@
 use crate::Result;
+use crossbeam::channel::{unbounded, Receiver, Sender};
 use log::{error, info};
 use rayon;
-use std::sync::mpsc::{channel, Receiver, Sender};
-use std::sync::{Arc, Mutex};
 use std::thread::{spawn, JoinHandle};
 
 type Job = Box<dyn FnOnce() + Send + 'static>;
@@ -40,13 +39,13 @@ pub struct SharedQueueThreadPool {
 }
 
 impl SharedQueueThreadPool {
-    fn new_thread(receiver: Arc<Mutex<Receiver<Job>>>, idx: u32) -> JoinHandle<()> {
+    fn new_thread(receiver: Receiver<Job>, idx: u32) -> JoinHandle<()> {
         spawn(move || {
             loop {
                 // We only care about handling unwind panics, since abort panics end every thread
                 // anyways
                 if let Err(_) = std::panic::catch_unwind(|| {
-                    let job = match receiver.lock().expect("mutex poisoned").recv() {
+                    let job = match receiver.recv() {
                         Ok(job) => job,
                         // Once sender has been dropped, worker threads should stop
                         Err(_) => return,
@@ -65,11 +64,10 @@ impl SharedQueueThreadPool {
 
 impl ThreadPool for SharedQueueThreadPool {
     fn new(threads: u32) -> Result<Self> {
-        let (tx, rx): (Sender<Job>, Receiver<Job>) = channel();
-        let receiver = Arc::new(Mutex::new(rx));
+        let (tx, rx): (Sender<Job>, Receiver<Job>) = unbounded();
 
         for idx in 0..threads {
-            Self::new_thread(receiver.clone(), idx);
+            Self::new_thread(rx.clone(), idx);
         }
 
         Ok(Self { sender: tx })
