@@ -1,4 +1,5 @@
 use failure::{ensure, format_err};
+use kvs::thread_pool::{SharedQueueThreadPool, ThreadPool};
 use kvs::{protocol, KvStore, KvsEngine, Result};
 use log::info;
 use std::convert::{TryFrom, TryInto};
@@ -91,32 +92,38 @@ fn main() -> Result<()> {
 fn run_server(config: &Config) -> Result<()> {
     let listener = TcpListener::bind(&config.addr)?;
     info!("Bind to {}", config.addr);
-    let mut store = KvStore::open(&std::env::current_dir()?)?;
+    let store = KvStore::open(&std::env::current_dir()?)?;
+    let thread_pool = SharedQueueThreadPool::new(20)?;
 
     for stream in listener.incoming() {
         let mut stream = stream?;
-        let msg = protocol::Message::read(&mut stream)?;
-        info!("Finished reading request from stream");
+        let mut store = store.clone();
 
-        let resp = match handle_request(msg, &mut store) {
-            Ok(Some(value)) => {
-                info!("Request SUCCESS, reply: {}", value.join(" "));
-                protocol::Message::Array(value)
-            }
-            Ok(None) => {
-                info!("Request SUCCESS, reply null");
-                protocol::Message::Null
-            }
-            Err(err) => {
-                let err = err.as_fail().to_string();
-                info!("Request FAILED, reply: {}", err);
-                protocol::Message::Error(err)
-            }
-        };
-        resp.write(&mut stream)?;
-        stream.flush()?;
-        info!("Finished writing response to stream");
+        thread_pool.spawn(move || {
+            let msg = protocol::Message::read(&mut stream).expect("message read error");
+            info!("Finished reading request from stream");
+
+            let resp = match handle_request(msg, &mut store) {
+                Ok(Some(value)) => {
+                    info!("Request SUCCESS, reply: {}", value.join(" "));
+                    protocol::Message::Array(value)
+                }
+                Ok(None) => {
+                    info!("Request SUCCESS, reply null");
+                    protocol::Message::Null
+                }
+                Err(err) => {
+                    let err = err.as_fail().to_string();
+                    info!("Request FAILED, reply: {}", err);
+                    protocol::Message::Error(err)
+                }
+            };
+            resp.write(&mut stream).expect("message write error");
+            stream.flush().expect("stream flush error");
+            info!("Finished writing response to stream");
+        });
     }
+
     Ok(())
 }
 
