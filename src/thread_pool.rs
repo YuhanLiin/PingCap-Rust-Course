@@ -1,4 +1,5 @@
 use crate::Result;
+use log::{error, info};
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread::{spawn, JoinHandle};
@@ -33,10 +34,30 @@ impl ThreadPool for NaiveThreadPool {
 }
 
 /// Sends tasks to a shared set of threads using a channel. Does not handle panics.
-#[allow(dead_code)]
 pub struct SharedQueueThreadPool {
     sender: Sender<Job>,
-    threads: Vec<JoinHandle<()>>,
+}
+
+impl SharedQueueThreadPool {
+    fn new_thread(receiver: Arc<Mutex<Receiver<Job>>>, idx: u32) -> JoinHandle<()> {
+        spawn(move || {
+            loop {
+                if let Err(_) = std::panic::catch_unwind(|| {
+                    let job = match receiver.lock().expect("mutex poisoned").recv() {
+                        Ok(job) => job,
+                        // Once sender has been dropped, worker threads should stop
+                        Err(_) => return,
+                    };
+
+                    info!("Thread {} received job", idx);
+                    job();
+                    info!("Thread {} finished job", idx);
+                }) {
+                    error!("Thread {} panicked, continuing", idx);
+                }
+            }
+        })
+    }
 }
 
 impl ThreadPool for SharedQueueThreadPool {
@@ -44,26 +65,14 @@ impl ThreadPool for SharedQueueThreadPool {
         let (tx, rx): (Sender<Job>, Receiver<Job>) = channel();
         let receiver = Arc::new(Mutex::new(rx));
 
-        let threads = (0..threads)
-            .map(|_| {
-                let receiver = receiver.clone();
-                spawn(move || loop {
-                    let job = receiver
-                        .lock()
-                        .expect("mutex poisoned")
-                        .recv()
-                        .expect("sender dropped");
-                    job();
-                })
-            })
-            .collect();
+        for idx in 0..threads {
+            Self::new_thread(receiver.clone(), idx);
+        }
 
-        Ok(Self {
-            threads,
-            sender: tx,
-        })
+        Ok(Self { sender: tx })
     }
 
+    // Performs panic recovery by replacing dead threads before sending messages
     fn spawn<F>(&self, job: F)
     where
         F: FnOnce() + Send + 'static,

@@ -48,8 +48,8 @@ impl ThreadPool {
 fn main() {
     let pool = ThreadPool::new(14).expect("can't create pool");
 
-    for i in 0..20 {
-        pool.spawn(move || println!("{}", i * i));
+    for _ in 0..4 {
+        pool.spawn(move || panic!());
     }
 
     loop {}
