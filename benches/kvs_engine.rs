@@ -57,7 +57,7 @@ fn write_bench_kvs(c: &mut Criterion) {
     c.bench_function("write kvs", move |b| {
         b.iter_batched(
             || {
-                let mut kvs = new_kvs(&temp.path());
+                let kvs = new_kvs(&temp.path());
                 kvs.clear().unwrap();
                 (kvs, data.clone())
             },
@@ -74,7 +74,7 @@ fn write_bench_sled(c: &mut Criterion) {
     c.bench_function("write sled", move |b| {
         b.iter_batched(
             || {
-                let mut sled = new_sled(&temp.path());
+                let sled = new_sled(&temp.path());
                 sled.clear().unwrap();
                 (sled, data.clone())
             },

@@ -8,10 +8,13 @@ use std::fs::{remove_file, rename, File, OpenOptions};
 use std::io::prelude::*;
 use std::io::{BufReader, BufWriter, ErrorKind, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
 /// Custom Result type used for KvStore operations.
 pub type Result<T> = std::result::Result<T, Error>;
 
+/// Defines ThreadPool trait and implementation for concurrent KVS engine
+pub mod thread_pool;
 /// Defines the network protocol for communicating between server and client
 pub mod protocol {
     use super::*;
@@ -98,7 +101,7 @@ impl Range {
 }
 
 /// Interface for key-value store backend
-pub trait KvsEngine {
+pub trait KvsEngine: Clone + Send + 'static {
     /// Maps a key in the storage to a specific value.
     /// Overwrites previous value if the key already exists.
     /// ```
@@ -116,11 +119,11 @@ pub trait KvsEngine {
     /// #   Ok(())
     /// # }
     /// ```
-    fn set(&mut self, key: String, value: String) -> Result<()>;
+    fn set(&self, key: String, value: String) -> Result<()>;
 
     /// Returns a copy of the value mapped to a given key if it exists.
     /// Otherwise, return None.
-    fn get(&mut self, key: String) -> Result<Option<String>>;
+    fn get(&self, key: String) -> Result<Option<String>>;
 
     /// Removes a key and its value from the storage.
     /// Does nothing if the key is not present in the storage.
@@ -139,10 +142,10 @@ pub trait KvsEngine {
     /// #   Ok(())
     /// # }
     /// ```
-    fn remove(&mut self, key: String) -> Result<()>;
+    fn remove(&self, key: String) -> Result<()>;
 
     /// Remove all keys and values and clears underlying disc space
-    fn clear(&mut self) -> Result<()>;
+    fn clear(&self) -> Result<()>;
 }
 
 const COMPACTION_THRESHOLD: u64 = 1024 * 1024;
@@ -162,31 +165,32 @@ const COMPACTION_THRESHOLD: u64 = 1024 * 1024;
 /// #   Ok(())
 /// # }
 /// ```
-pub struct KvStore {
-    // Directory where the data file is stored.
-    dir: PathBuf,
-    // Read and write handles to the data file. Must always point to kvs.cbor file in self.dir.
-    reader: BufReader<File>,
-    writer: BufWriter<File>,
-    // Mapping between key to log file offset to make lookups faster
-    index: HashMap<String, Range>,
-    // Number of bytes taken up by stale commands
-    stale_bytes: u64,
+#[derive(Clone)]
+pub struct KvStore(Arc<Mutex<KvStoreInternal>>);
+
+impl KvsEngine for KvStore {
+    fn set(&self, key: String, value: String) -> Result<()> {
+        self.0.lock().unwrap().set(key, value)
+    }
+
+    fn get(&self, key: String) -> Result<Option<String>> {
+        self.0.lock().unwrap().get(key)
+    }
+
+    fn remove(&self, key: String) -> Result<()> {
+        self.0.lock().unwrap().remove(key)
+    }
+
+    fn clear(&self) -> Result<()> {
+        self.0.lock().unwrap().clear()
+    }
 }
 
 impl KvStore {
-    fn log_path(dir: &Path) -> PathBuf {
-        dir.join("kvs.cbor")
-    }
-
-    fn compacted_log_path(dir: &Path) -> PathBuf {
-        dir.join("kvs_compact.cbor")
-    }
-
     /// Loads the in-memory index of the storage from a file to construct a KvStore
     pub fn open(dir: &Path) -> Result<Self> {
-        let log_path = Self::log_path(dir);
-        let compact_path = Self::compacted_log_path(dir);
+        let log_path = KvStoreInternal::log_path(dir);
+        let compact_path = KvStoreInternal::compacted_log_path(dir);
 
         // Delete any kvs_compact files if it exists, since it's the result of a failed compaction
         if let Err(error) = remove_file(&compact_path) {
@@ -202,7 +206,7 @@ impl KvStore {
             .open(&log_path)?;
         let read_file = OpenOptions::new().read(true).open(&log_path)?;
 
-        let mut out = Self {
+        let mut out = KvStoreInternal {
             reader: BufReader::new(read_file),
             writer: BufWriter::new(write_file),
             index: HashMap::new(),
@@ -210,7 +214,30 @@ impl KvStore {
             stale_bytes: 0,
         };
         out.build_index()?;
-        Ok(out)
+
+        Ok(Self(Arc::new(Mutex::new(out))))
+    }
+}
+
+struct KvStoreInternal {
+    // Directory where the data file is stored.
+    dir: PathBuf,
+    // Read and write handles to the data file. Must always point to kvs.cbor file in self.dir.
+    reader: BufReader<File>,
+    writer: BufWriter<File>,
+    // Mapping between key to log file offset to make lookups faster
+    index: HashMap<String, Range>,
+    // Number of bytes taken up by stale commands
+    stale_bytes: u64,
+}
+
+impl KvStoreInternal {
+    fn log_path(dir: &Path) -> PathBuf {
+        dir.join("kvs.cbor")
+    }
+
+    fn compacted_log_path(dir: &Path) -> PathBuf {
+        dir.join("kvs_compact.cbor")
     }
 
     fn compaction(&mut self) -> Result<()> {
@@ -286,9 +313,7 @@ impl KvStore {
 
         Ok(())
     }
-}
 
-impl KvsEngine for KvStore {
     fn get(&mut self, key: String) -> Result<Option<String>> {
         if let Some(offset) = self.index.get(&key).cloned() {
             self.reader.seek(SeekFrom::Start(offset.start))?;
@@ -353,38 +378,41 @@ impl KvsEngine for KvStore {
 }
 
 /// KvsEngine wrapper around sled DB engine
-pub struct SledKvsEngine(sled::Db);
+#[derive(Clone)]
+pub struct SledKvsEngine(Arc<Mutex<sled::Db>>);
 
 impl SledKvsEngine {
     /// Creates or loads sled database at specified path using default configuration
     pub fn open(path: &Path) -> Result<Self> {
-        Ok(Self(sled::Db::start_default(path)?))
+        Ok(Self(Arc::new(Mutex::new(sled::Db::start_default(path)?))))
     }
 }
 
 impl KvsEngine for SledKvsEngine {
-    fn get(&mut self, key: String) -> Result<Option<String>> {
-        let out = self.0.get(&key).map(|s| {
+    fn get(&self, key: String) -> Result<Option<String>> {
+        let out = self.0.lock().unwrap().get(&key).map(|s| {
             s.as_ref()
                 .map(|s| String::from_utf8(s.to_vec()).expect("non-string in sled DB"))
         })?;
         Ok(out)
     }
 
-    fn set(&mut self, key: String, value: String) -> Result<()> {
-        self.0.set(&key, value.into_bytes())?;
-        self.0.flush()?;
+    fn set(&self, key: String, value: String) -> Result<()> {
+        let db = self.0.lock().unwrap();
+        db.set(&key, value.into_bytes())?;
+        db.flush()?;
         Ok(())
     }
 
-    fn remove(&mut self, key: String) -> Result<()> {
-        self.0.del(&key)?.ok_or(KeyNotFound)?;
-        self.0.flush()?;
+    fn remove(&self, key: String) -> Result<()> {
+        let db = self.0.lock().unwrap();
+        db.del(&key)?.ok_or(KeyNotFound)?;
+        db.flush()?;
         Ok(())
     }
 
-    fn clear(&mut self) -> Result<()> {
-        self.0.clear()?;
+    fn clear(&self) -> Result<()> {
+        self.0.lock().unwrap().clear()?;
         Ok(())
     }
 }
