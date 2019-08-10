@@ -1,7 +1,6 @@
-use failure::{ensure, format_err};
-use kvs::protocol;
+use kvs::client::KvsClient;
 use kvs::Result;
-use std::net::{Shutdown, SocketAddr, TcpStream};
+use std::net::SocketAddr;
 use structopt::StructOpt;
 
 #[derive(StructOpt)]
@@ -29,40 +28,28 @@ enum Args {
     },
 }
 
+fn get_addr(addr: Option<SocketAddr>) -> SocketAddr {
+    addr.unwrap_or("127.0.0.1:4000".parse().unwrap())
+}
+
 fn main() -> Result<()> {
     let args = Args::from_args();
 
-    let (req_args, addr) = match args {
-        Args::Get { key, addr } => (vec![protocol::GET.to_owned(), key], addr),
-        Args::Set { key, value, addr } => (vec![protocol::SET.to_owned(), key, value], addr),
-        Args::Remove { key, addr } => (vec![protocol::REMOVE.to_owned(), key], addr),
-    };
+    match args {
+        Args::Get { key, addr } => {
+            let value = KvsClient::new(get_addr(addr))?.get(key)?;
 
-    let req = protocol::Message::Array(req_args);
-    let addr = addr.unwrap_or("127.0.0.1:4000".parse().unwrap());
-    let mut stream = TcpStream::connect(addr)?;
-
-    req.write(&mut stream)?;
-    // Need to shutdown write socket so server read socket gets dropped, otherwise server read
-    // never finishes
-    stream.shutdown(Shutdown::Write)?;
-
-    let resp = protocol::Message::read(&mut stream)?;
-    match resp {
-        protocol::Message::Array(arr) => {
-            // Empty array means output of nothing, so we don't print
-            if !arr.is_empty() {
-                ensure!(
-                    arr.len() == 1,
-                    "unexpected server output: {}",
-                    arr.join(" ")
-                );
-
-                println!("{}", arr[0]);
-            }
+            match value {
+                Some(val) => println!("{}", val),
+                None => println!("Key not found"),
+            };
         }
-        protocol::Message::Null => println!("Key not found\n"),
-        protocol::Message::Error(err) => return Err(format_err!("Error: {}", err)),
+        Args::Set { key, value, addr } => {
+            KvsClient::new(get_addr(addr))?.set(key, value)?;
+        }
+        Args::Remove { key, addr } => {
+            KvsClient::new(get_addr(addr))?.remove(key)?;
+        }
     };
 
     Ok(())

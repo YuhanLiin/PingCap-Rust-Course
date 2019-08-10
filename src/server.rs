@@ -34,13 +34,9 @@ impl<E: KvsEngine, P: ThreadPool> KvsServer<E, P> {
                 info!("Finished reading request from stream");
 
                 let resp = match Self::handle_request(msg, &mut store) {
-                    Ok(Some(value)) => {
+                    Ok(value) => {
                         info!("Request SUCCESS, reply: {}", value.join(" "));
                         protocol::Message::Array(value)
-                    }
-                    Ok(None) => {
-                        info!("Request SUCCESS, reply null");
-                        protocol::Message::Null
                     }
                     Err(err) => {
                         let err = err.as_fail().to_string();
@@ -57,9 +53,9 @@ impl<E: KvsEngine, P: ThreadPool> KvsServer<E, P> {
         Ok(())
     }
 
-    // Get returns a single element list or Null if element is not found
-    // Set and Remove return empty list, indicating lack of stdout client-side
-    fn handle_request(msg: protocol::Message, store: &mut E) -> Result<Option<Vec<String>>> {
+    // Get returns a single element list or empty list if element is not found
+    // Set and Remove also return empty lists
+    fn handle_request(msg: protocol::Message, store: &mut E) -> Result<Vec<String>> {
         match msg {
             protocol::Message::Array(arr) => {
                 info!("Received TCP args: {}", arr.join(" "));
@@ -68,32 +64,35 @@ impl<E: KvsEngine, P: ThreadPool> KvsServer<E, P> {
                     Some(protocol::GET) => {
                         check_len(&arr, 2)?;
                         let key = &arr[1];
-                        // If value does not exist, return None
-                        Ok(store.get(key.to_owned())?.map(|val| vec![val]))
+                        // If value does not exist, return empty list
+                        Ok(store
+                            .get(key.to_owned())?
+                            .map(|val| vec![val])
+                            .unwrap_or_default())
                     }
 
                     Some(protocol::SET) => {
                         check_len(&arr, 3)?;
                         let (key, value) = (&arr[1], &arr[2]);
                         store.set(key.to_owned(), value.to_owned())?;
-                        Ok(Some(Vec::new()))
+                        Ok(Vec::new())
                     }
 
                     Some(protocol::REMOVE) => {
                         check_len(&arr, 2)?;
                         let key = &arr[1];
                         store.remove(key.to_owned())?;
-                        Ok(Some(Vec::new()))
+                        Ok(Vec::new())
                     }
 
                     _ => Err(format_err!("invalid incoming message")),
                 }
             }
             protocol::Message::Error(err) => Err(format_err!("received error message {}", err)),
-            protocol::Message::Null => Err(format_err!("received null")),
         }
     }
 }
+
 fn check_len(arr: &[String], expected: usize) -> Result<()> {
     ensure!(
         arr.len() == expected,

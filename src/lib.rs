@@ -13,6 +13,8 @@ use std::sync::{Arc, Mutex};
 /// Custom Result type used for KvStore operations.
 pub type Result<T> = std::result::Result<T, Error>;
 
+/// Client for sending KVSEngine requests
+pub mod client;
 /// Server for handling KVSEngine requests
 pub mod server;
 /// Defines ThreadPool trait and implementation for concurrent KVS engine
@@ -39,9 +41,6 @@ pub mod protocol {
         #[serde(rename = "e")]
         /// Error message inidicating failure
         Error(String),
-        #[serde(rename = "n")]
-        /// Null value used to indicate values that are not found
-        Null,
     }
 
     impl Message {
