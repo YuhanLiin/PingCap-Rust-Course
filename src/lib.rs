@@ -379,18 +379,18 @@ impl KvStoreInternal {
 
 /// KvsEngine wrapper around sled DB engine
 #[derive(Clone)]
-pub struct SledKvsEngine(Arc<Mutex<sled::Db>>);
+pub struct SledKvsEngine(sled::Db);
 
 impl SledKvsEngine {
     /// Creates or loads sled database at specified path using default configuration
     pub fn open(path: &Path) -> Result<Self> {
-        Ok(Self(Arc::new(Mutex::new(sled::Db::start_default(path)?))))
+        Ok(Self(sled::Db::start_default(path)?))
     }
 }
 
 impl KvsEngine for SledKvsEngine {
     fn get(&self, key: String) -> Result<Option<String>> {
-        let out = self.0.lock().unwrap().get(&key).map(|s| {
+        let out = self.0.get(&key).map(|s| {
             s.as_ref()
                 .map(|s| String::from_utf8(s.to_vec()).expect("non-string in sled DB"))
         })?;
@@ -398,21 +398,19 @@ impl KvsEngine for SledKvsEngine {
     }
 
     fn set(&self, key: String, value: String) -> Result<()> {
-        let db = self.0.lock().unwrap();
-        db.set(&key, value.into_bytes())?;
-        db.flush()?;
+        self.0.set(&key, value.into_bytes())?;
+        self.0.flush()?;
         Ok(())
     }
 
     fn remove(&self, key: String) -> Result<()> {
-        let db = self.0.lock().unwrap();
-        db.del(&key)?.ok_or(KeyNotFound)?;
-        db.flush()?;
+        self.0.del(&key)?.ok_or(KeyNotFound)?;
+        self.0.flush()?;
         Ok(())
     }
 
     fn clear(&self) -> Result<()> {
-        self.0.lock().unwrap().clear()?;
+        self.0.clear()?;
         Ok(())
     }
 }
