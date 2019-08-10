@@ -1,13 +1,13 @@
-use failure::{ensure, format_err};
-use kvs::thread_pool::{SharedQueueThreadPool, ThreadPool};
-use kvs::{protocol, KvStore, KvsEngine, Result};
+use failure::ensure;
+use kvs::server::KvsServer;
+use kvs::thread_pool::SharedQueueThreadPool;
+use kvs::{KvStore, Result, SledKvsEngine};
 use log::info;
 use std::convert::{TryFrom, TryInto};
 use std::env::current_dir;
 use std::fs;
 use std::io::ErrorKind;
-use std::io::Write;
-use std::net::{SocketAddr, TcpListener};
+use std::net::SocketAddr;
 use std::path::Path;
 use stderrlog;
 use structopt::StructOpt;
@@ -24,6 +24,7 @@ struct Args {
 struct Config {
     addr: SocketAddr,
     engine: String,
+    threads: u32,
 }
 
 impl TryFrom<Args> for Config {
@@ -46,6 +47,10 @@ impl TryFrom<Args> for Config {
                     engine
                 }
                 None => {
+                    ensure!(
+                        engine == "kvs" || engine == "sled",
+                        "engine should be \"kvs\" or \"sled\""
+                    );
                     fs::write(&engine_file, &engine)?;
                     engine
                 }
@@ -59,7 +64,12 @@ impl TryFrom<Args> for Config {
             },
         };
 
-        Ok(Config { addr, engine })
+        // Use magic number 20 for thread count
+        Ok(Config {
+            addr,
+            engine,
+            threads: 20,
+        })
     }
 }
 
@@ -86,93 +96,17 @@ fn main() -> Result<()> {
     info!("Engine: {}", config.engine);
     info!("Socket Address: {}", config.addr);
 
-    run_server(&config)
-}
-
-fn run_server(config: &Config) -> Result<()> {
-    let listener = TcpListener::bind(&config.addr)?;
-    info!("Bind to {}", config.addr);
-    let store = KvStore::open(&std::env::current_dir()?)?;
-    let thread_pool = SharedQueueThreadPool::new(20)?;
-
-    for stream in listener.incoming() {
-        let mut stream = stream?;
-        let mut store = store.clone();
-
-        thread_pool.spawn(move || {
-            let msg = protocol::Message::read(&mut stream).expect("message read error");
-            info!("Finished reading request from stream");
-
-            let resp = match handle_request(msg, &mut store) {
-                Ok(Some(value)) => {
-                    info!("Request SUCCESS, reply: {}", value.join(" "));
-                    protocol::Message::Array(value)
-                }
-                Ok(None) => {
-                    info!("Request SUCCESS, reply null");
-                    protocol::Message::Null
-                }
-                Err(err) => {
-                    let err = err.as_fail().to_string();
-                    info!("Request FAILED, reply: {}", err);
-                    protocol::Message::Error(err)
-                }
-            };
-            resp.write(&mut stream).expect("message write error");
-            stream.flush().expect("stream flush error");
-            info!("Finished writing response to stream");
-        });
+    match &config.engine[..] {
+        "kvs" => KvsServer::<_, SharedQueueThreadPool>::new(
+            KvStore::open(&current_dir()?)?,
+            config.threads,
+        )?
+        .run(&config.addr),
+        "sled" => KvsServer::<_, SharedQueueThreadPool>::new(
+            SledKvsEngine::open(&current_dir()?)?,
+            config.threads,
+        )?
+        .run(&config.addr),
+        _ => unreachable!(),
     }
-
-    Ok(())
-}
-
-// Get returns a single element list or Null if element is not found
-// Set and Remove return empty list, indicating lack of stdout client-side
-fn handle_request(
-    msg: protocol::Message,
-    store: &mut impl KvsEngine,
-) -> Result<Option<Vec<String>>> {
-    match msg {
-        protocol::Message::Array(arr) => {
-            info!("Received TCP args: {}", arr.join(" "));
-
-            match arr.get(0).map(|s| &s[..]) {
-                Some(protocol::GET) => {
-                    check_len(&arr, 2)?;
-                    let key = &arr[1];
-                    // If value does not exist, return None
-                    Ok(store.get(key.to_owned())?.map(|val| vec![val]))
-                }
-
-                Some(protocol::SET) => {
-                    check_len(&arr, 3)?;
-                    let (key, value) = (&arr[1], &arr[2]);
-                    store.set(key.to_owned(), value.to_owned())?;
-                    Ok(Some(Vec::new()))
-                }
-
-                Some(protocol::REMOVE) => {
-                    check_len(&arr, 2)?;
-                    let key = &arr[1];
-                    store.remove(key.to_owned())?;
-                    Ok(Some(Vec::new()))
-                }
-
-                _ => Err(format_err!("invalid incoming message")),
-            }
-        }
-        protocol::Message::Error(err) => Err(format_err!("received error message {}", err)),
-        protocol::Message::Null => Err(format_err!("received null")),
-    }
-}
-
-fn check_len(arr: &[String], expected: usize) -> Result<()> {
-    ensure!(
-        arr.len() == expected,
-        "server received {} args, expected {}",
-        arr.len(),
-        expected
-    );
-    Ok(())
 }

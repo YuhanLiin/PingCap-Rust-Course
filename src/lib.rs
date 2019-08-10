@@ -13,9 +13,11 @@ use std::sync::{Arc, Mutex};
 /// Custom Result type used for KvStore operations.
 pub type Result<T> = std::result::Result<T, Error>;
 
+/// Server for handling KVSEngine requests
+pub mod server;
 /// Defines ThreadPool trait and implementation for concurrent KVS engine
 pub mod thread_pool;
-/// Defines the network protocol for communicating between server and client
+/// Network protocol for communicating between server and client
 pub mod protocol {
     use super::*;
 

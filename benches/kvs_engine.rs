@@ -24,7 +24,7 @@ fn gen_write_data() -> Vec<(String, String)> {
         .collect()
 }
 
-fn write_loop(store: &mut impl KvsEngine, data: Vec<(String, String)>) {
+fn write_loop(store: &impl KvsEngine, data: Vec<(String, String)>) {
     for (key, val) in data.into_iter() {
         store.set(key, val).expect("write failed");
     }
@@ -36,7 +36,7 @@ fn gen_read_data() -> Vec<String> {
     (0..100).map(|_| gen_string(&mut rng)).collect()
 }
 
-fn read_loop(store: &mut impl KvsEngine, data: Vec<String>) {
+fn read_loop(store: &impl KvsEngine, data: Vec<String>) {
     for key in data.into_iter() {
         store.get(key).expect("read failed");
     }
@@ -55,13 +55,13 @@ fn write_bench_kvs(c: &mut Criterion) {
     let temp = TempDir::new().expect("can't open tempdir");
 
     c.bench_function("write kvs", move |b| {
+        let kvs = new_kvs(&temp.path());
         b.iter_batched(
             || {
-                let kvs = new_kvs(&temp.path());
                 kvs.clear().unwrap();
-                (kvs, data.clone())
+                data.clone()
             },
-            |(mut kvs, data)| write_loop(&mut kvs, data),
+            |data| write_loop(&kvs, data),
             BatchSize::SmallInput,
         )
     });
@@ -72,13 +72,13 @@ fn write_bench_sled(c: &mut Criterion) {
     let temp = TempDir::new().expect("can't open tempdir");
 
     c.bench_function("write sled", move |b| {
+        let sled = new_sled(&temp.path());
         b.iter_batched(
             || {
-                let sled = new_sled(&temp.path());
                 sled.clear().unwrap();
-                (sled, data.clone())
+                data.clone()
             },
-            |(mut kvs, data)| write_loop(&mut kvs, data),
+            |data| write_loop(&sled, data),
             BatchSize::SmallInput,
         )
     });
@@ -89,16 +89,16 @@ fn read_bench_kvs(c: &mut Criterion) {
     let temp = TempDir::new().expect("can't open tempdir");
 
     c.bench_function("read kvs", move |b| {
+        let kvs = new_kvs(&temp.path());
         b.iter_batched(
             || {
-                let mut kvs = new_kvs(&temp.path());
                 kvs.clear().unwrap();
                 // Write in the keys before reading them
                 let write_data = data.iter().cloned().map(|s| (s.clone(), s)).collect();
-                write_loop(&mut kvs, write_data);
-                (kvs, data.clone())
+                write_loop(&kvs, write_data);
+                data.clone()
             },
-            |(mut kvs, data)| read_loop(&mut kvs, data),
+            |data| read_loop(&kvs, data),
             BatchSize::SmallInput,
         )
     });
@@ -109,16 +109,16 @@ fn read_bench_sled(c: &mut Criterion) {
     let temp = TempDir::new().expect("can't open tempdir");
 
     c.bench_function("read sled", move |b| {
+        let sled = new_sled(&temp.path());
         b.iter_batched(
             || {
-                let mut sled = new_sled(&temp.path());
                 sled.clear().unwrap();
                 // Write in the keys before reading them
                 let write_data = data.iter().cloned().map(|s| (s.clone(), s)).collect();
-                write_loop(&mut sled, write_data);
-                (sled, data.clone())
+                write_loop(&sled, write_data);
+                data.clone()
             },
-            |(mut sled, data)| read_loop(&mut sled, data),
+            |data| read_loop(&sled, data),
             BatchSize::SmallInput,
         )
     });
