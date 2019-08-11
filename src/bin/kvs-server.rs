@@ -101,12 +101,12 @@ fn main() -> Result<()> {
             KvStore::open(&current_dir()?)?,
             config.threads,
         )?
-        .run(&config.addr),
+        .run(&config.addr, None),
         "sled" => KvsServer::<_, SharedQueueThreadPool>::new(
             SledKvsEngine::open(&current_dir()?)?,
             config.threads,
         )?
-        .run(&config.addr),
+        .run(&config.addr, None),
         _ => unreachable!(),
     }
 }

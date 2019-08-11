@@ -1,32 +1,34 @@
 use crate::protocol;
+use crate::thread_pool::ThreadPool;
 use crate::Result;
+use crossbeam::sync::WaitGroup;
 use failure::{ensure, format_err};
 use std::net::{Shutdown, SocketAddr, TcpStream};
+use std::sync::{Arc, Mutex};
 
 /// Client that sends TCP requests to KVS server.
 /// Holds the TCP stream for its entire lifetime.
 pub struct KvsClient {
-    stream: TcpStream,
+    addr: SocketAddr,
 }
 
 impl KvsClient {
     /// Create a new client on an address
-    pub fn new(addr: SocketAddr) -> Result<Self> {
-        Ok(Self {
-            stream: TcpStream::connect(addr)?,
-        })
+    pub fn new(addr: SocketAddr) -> Self {
+        Self { addr }
     }
 
-    fn send(&mut self, req: protocol::Message) -> Result<protocol::Message> {
-        req.write(&mut self.stream)?;
+    fn send(&self, req: protocol::Message) -> Result<protocol::Message> {
+        let mut stream = TcpStream::connect(&self.addr)?;
+        req.write(&mut stream)?;
         // Need to shutdown write socket so server read socket gets dropped, otherwise server read
         // never finishes
-        self.stream.shutdown(Shutdown::Write)?;
-        Ok(protocol::Message::read(&mut self.stream)?)
+        stream.shutdown(Shutdown::Write)?;
+        Ok(protocol::Message::read(&mut stream)?)
     }
 
     /// Send a SET request to the server
-    pub fn set(&mut self, key: String, value: String) -> Result<()> {
+    pub fn set(&self, key: String, value: String) -> Result<()> {
         let req = protocol::Message::Array(vec![protocol::SET.to_owned(), key, value]);
 
         match self.send(req)? {
@@ -36,7 +38,7 @@ impl KvsClient {
     }
 
     /// Send a GET request to the server. Key may not exist
-    pub fn get(&mut self, key: String) -> Result<Option<String>> {
+    pub fn get(&self, key: String) -> Result<Option<String>> {
         let req = protocol::Message::Array(vec![protocol::GET.to_owned(), key]);
 
         match self.send(req)? {
@@ -57,12 +59,103 @@ impl KvsClient {
     }
 
     /// Send a REMOVE request to the server
-    pub fn remove(&mut self, key: String) -> Result<()> {
+    pub fn remove(&self, key: String) -> Result<()> {
         let req = protocol::Message::Array(vec![protocol::REMOVE.to_owned(), key]);
 
         match self.send(req)? {
             protocol::Message::Error(err) => Err(format_err!("Error: {}", err)),
             _ => Ok(()),
         }
+    }
+}
+
+/// Uses a threadpool to send multiple set or get requests
+pub struct ThreadedKvsClient<P: ThreadPool> {
+    addr: SocketAddr,
+    pool: P,
+}
+
+impl<P: ThreadPool> ThreadedKvsClient<P> {
+    /// Create a new client on an address
+    pub fn new(addr: SocketAddr, threads: u32) -> Result<Self> {
+        Ok(Self {
+            addr,
+            pool: P::new(threads)?,
+        })
+    }
+
+    /// Set multiple key-value pairs concurrently. Blocks until all requests are done and returns
+    /// Error is any operations failed.
+    pub fn set(&self, kv_pairs: impl Iterator<Item = (String, String)>) -> Result<()> {
+        let wg = WaitGroup::new();
+        let result = Arc::new(Mutex::new(Ok(())));
+
+        for (key, val) in kv_pairs {
+            let result = Arc::clone(&result);
+            let addr = self.addr.clone();
+            let wg = wg.clone();
+
+            // Instead of panicking, all errors are sent to the outer result so we can track them
+            // from the main thread
+            self.pool.spawn(move || {
+                let client = KvsClient::new(addr);
+
+                match client.set(key, val) {
+                    // Only panicks if result mutex is poisoned, which should never happen
+                    Err(err) => *result.lock().unwrap() = Err(err),
+                    _ => (),
+                };
+
+                drop(wg);
+            })
+        }
+
+        // Once we get here all the spawned jobs should be done
+        wg.wait();
+
+        let mut result = result.lock().unwrap();
+        std::mem::replace(&mut *result, Ok(()))
+    }
+
+    /// Get multiple keys concurrently. Blocks until all requests are done and returns Error is any
+    /// operations failed. Instead of returning the values the method takes a fallible handler
+    /// closure that processes each retrieved value concurrently.
+    pub fn get(
+        &self,
+        keys: impl Iterator<Item = String>,
+        // Call for each retrieved value in the threads. Must not panic.
+        handler: impl Fn(Option<String>) -> Result<()> + Send + 'static + Clone,
+    ) -> Result<()> {
+        let wg = WaitGroup::new();
+        let result = Arc::new(Mutex::new(Ok(())));
+
+        for key in keys {
+            let result = Arc::clone(&result);
+            let addr = self.addr.clone();
+            let wg = wg.clone();
+            let handler = handler.clone();
+
+            // Again, no panicking
+            self.pool.spawn(move || {
+                let client = KvsClient::new(addr);
+
+                let handler_result = (|| {
+                    let val = client.get(key)?;
+                    handler(val)
+                })();
+
+                match handler_result {
+                    Err(err) => *result.lock().unwrap() = Err(err),
+                    _ => (),
+                };
+
+                drop(wg);
+            })
+        }
+
+        wg.wait();
+
+        let mut result = result.lock().unwrap();
+        std::mem::replace(&mut *result, Ok(()))
     }
 }

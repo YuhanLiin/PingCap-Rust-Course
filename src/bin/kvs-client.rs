@@ -37,7 +37,7 @@ fn main() -> Result<()> {
 
     match args {
         Args::Get { key, addr } => {
-            let value = KvsClient::new(get_addr(addr))?.get(key)?;
+            let value = KvsClient::new(get_addr(addr)).get(key)?;
 
             match value {
                 Some(val) => println!("{}", val),
@@ -45,10 +45,10 @@ fn main() -> Result<()> {
             };
         }
         Args::Set { key, value, addr } => {
-            KvsClient::new(get_addr(addr))?.set(key, value)?;
+            KvsClient::new(get_addr(addr)).set(key, value)?;
         }
         Args::Remove { key, addr } => {
-            KvsClient::new(get_addr(addr))?.remove(key)?;
+            KvsClient::new(get_addr(addr)).remove(key)?;
         }
     };
 
