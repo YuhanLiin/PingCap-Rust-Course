@@ -1,74 +1,142 @@
 use crate::protocol::*;
-use crate::thread_pool::ThreadPool;
+//use crate::thread_pool::ThreadPool;
 use crate::Result;
-use crossbeam::sync::WaitGroup;
+//use crossbeam::sync::WaitGroup;
 use failure::{ensure, format_err};
+use std::io::prelude::*;
+use std::io::{BufReader, BufWriter};
 use std::net::{Shutdown, SocketAddr, TcpStream};
-use std::sync::{Arc, Mutex};
+//use std::sync::{Arc, Mutex};
 
 /// Client that sends TCP requests to KVS server.
 /// Holds the TCP stream for its entire lifetime.
 pub struct KvsClient {
-    addr: SocketAddr,
+    // These should point to same address
+    reader: BufReader<TcpStream>,
+    writer: BufWriter<TcpStream>,
 }
 
 impl KvsClient {
     /// Create a new client on an address
-    pub fn new(addr: SocketAddr) -> Self {
-        Self { addr }
+    pub fn new(addr: &SocketAddr) -> Result<Self> {
+        let stream = TcpStream::connect(addr)?;
+        let stream_clone = stream.try_clone()?;
+
+        Ok(Self {
+            reader: BufReader::new(stream),
+            writer: BufWriter::new(stream_clone),
+        })
     }
 
-    fn send(&self, req: Message) -> Result<Message> {
-        let mut stream = TcpStream::connect(&self.addr)?;
-        req.write(&mut stream)?;
-        // Need to shutdown write socket so server read socket gets dropped, otherwise server read
-        // never finishes
-        stream.shutdown(Shutdown::Write)?;
-        Ok(Message::read(&mut stream)?)
-    }
-
-    /// Send a SET request to the server
-    pub fn set(&self, key: String, value: String) -> Result<()> {
+    fn set_write(&mut self, key: String, value: String) -> Result<()> {
         let req = Message::Array(vec![SET.to_owned(), key, value]);
-
-        match self.send(req)? {
-            Message::Error(err) => Err(format_err!("Error: {}", err)),
-            _ => Ok(()),
-        }
+        req.write(&mut self.writer)?;
+        Ok(())
     }
 
-    /// Send a GET request to the server. Key may not exist
-    pub fn get(&self, key: String) -> Result<Option<String>> {
-        let req = Message::Array(vec![GET.to_owned(), key]);
+    fn read_key(&mut self) -> Result<String> {
+        let res = Message::read(&mut self.reader)?;
 
-        match self.send(req)? {
+        match res {
             Message::Error(err) => Err(format_err!("Error: {}", err)),
-            Message::Array(arr) => {
-                if arr.is_empty() {
-                    Ok(None)
-                } else {
-                    ensure!(
-                        arr.len() == 1,
-                        "unexpected server output: {}",
-                        arr.join(" ")
-                    );
-                    Ok(Some(arr[0].to_owned()))
-                }
+            Message::Array(mut arr) => {
+                ensure!(
+                    arr.len() == 1,
+                    "unexpected server output: {}",
+                    arr.join(" ")
+                );
+
+                Ok(arr.remove(0))
             }
         }
     }
 
-    /// Send a REMOVE request to the server
-    pub fn remove(&self, key: String) -> Result<()> {
-        let req = Message::Array(vec![REMOVE.to_owned(), key]);
+    fn get_write(&mut self, key: String) -> Result<()> {
+        let req = Message::Array(vec![GET.to_owned(), key]);
+        req.write(&mut self.writer)?;
+        Ok(())
+    }
 
-        match self.send(req)? {
+    fn read_pair(&mut self) -> Result<(String, Option<String>)> {
+        let res = Message::read(&mut self.reader)?;
+
+        match res {
             Message::Error(err) => Err(format_err!("Error: {}", err)),
-            _ => Ok(()),
+            // Return value format for GET is [key] or [key, value]
+            Message::Array(mut arr) => {
+                ensure!(
+                    arr.len() == 1 || arr.len() == 2,
+                    "unexpected server output: {}",
+                    arr.join(" ")
+                );
+
+                let key = arr.remove(0);
+                Ok((key, arr.pop()))
+            }
         }
     }
-}
 
+    fn remove_write(&mut self, key: String) -> Result<()> {
+        let req = Message::Array(vec![REMOVE.to_owned(), key]);
+        req.write(&mut self.writer)?;
+        Ok(())
+    }
+
+    // Length is restricted to a single byte
+    // Write this to the start of every stream to tell server how many requests we are sending
+    fn write_length(&mut self, len: u8) -> Result<()> {
+        self.writer.write_all(&[len])?;
+        Ok(())
+    }
+
+    // Need to call this after all writes are done so that server actually receives data
+    // Once this is called we can no longer write to this client
+    fn finish_writing(&mut self) -> Result<()> {
+        self.writer.flush()?;
+        // Need to shutdown write socket so server read socket gets dropped, otherwise server read
+        // never finishes. Once shutdown is done, the socket can no longer be used to write.
+        self.writer.get_ref().shutdown(Shutdown::Write)?;
+        Ok(())
+    }
+
+    /// Send a SET request to the server
+    pub fn set<'a>(
+        mut self,
+        key: String,
+        value: String,
+        batch_size: u8,
+    ) -> Result<impl Iterator<Item = Result<String>> + 'a> {
+        self.write_length(batch_size)?;
+        self.set_write(key, value)?;
+        self.finish_writing()?;
+        Ok((0..batch_size).map(move |_| self.read_key()))
+    }
+
+    /// Send a GET request to the server. Key may not exist
+    pub fn get<'a>(
+        mut self,
+        key: String,
+        batch_size: u8,
+    ) -> Result<impl Iterator<Item = Result<(String, Option<String>)>> + 'a> {
+        self.write_length(batch_size)?;
+        self.get_write(key)?;
+        self.finish_writing()?;
+        Ok((0..batch_size).map(move |_| self.read_pair()))
+    }
+
+    /// Send a REMOVE request to the server
+    pub fn remove<'a>(
+        mut self,
+        key: String,
+        batch_size: u8,
+    ) -> Result<impl Iterator<Item = Result<String>> + 'a> {
+        self.write_length(batch_size)?;
+        self.remove_write(key)?;
+        self.finish_writing()?;
+        Ok((0..batch_size).map(move |_| self.read_key()))
+    }
+}
+/*
 /// Uses a threadpool to send multiple set or get requests
 pub struct ThreadedKvsClient<P: ThreadPool> {
     addr: SocketAddr,
@@ -157,3 +225,4 @@ impl<P: ThreadPool> ThreadedKvsClient<P> {
         std::mem::replace(&mut *result, Ok(()))
     }
 }
+*/

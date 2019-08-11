@@ -1,3 +1,4 @@
+use failure::ensure;
 use kvs::client::KvsClient;
 use kvs::Result;
 use std::net::SocketAddr;
@@ -37,18 +38,32 @@ fn main() -> Result<()> {
 
     match args {
         Args::Get { key, addr } => {
-            let value = KvsClient::new(get_addr(addr)).get(key)?;
+            let (k, value) = KvsClient::new(&get_addr(addr))?
+                .get(key.clone(), 1)?
+                .next()
+                .unwrap()?;
+            ensure!(k == key, "server returned unexpected key {}", k);
 
             match value {
                 Some(val) => println!("{}", val),
                 None => println!("Key not found"),
             };
         }
+
         Args::Set { key, value, addr } => {
-            KvsClient::new(get_addr(addr)).set(key, value)?;
+            let k = KvsClient::new(&get_addr(addr))?
+                .set(key.clone(), value, 1)?
+                .next()
+                .unwrap()?;
+            ensure!(k == key, "server returned unexpected key {}", k);
         }
+
         Args::Remove { key, addr } => {
-            KvsClient::new(get_addr(addr)).remove(key)?;
+            let k = KvsClient::new(&get_addr(addr))?
+                .remove(key.clone(), 1)?
+                .next()
+                .unwrap()?;
+            ensure!(k == key, "server returned unexpected key {}", k);
         }
     };
 
