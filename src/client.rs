@@ -1,12 +1,13 @@
 use crate::protocol::*;
-//use crate::thread_pool::ThreadPool;
+use crate::thread_pool::ThreadPool;
 use crate::Result;
-//use crossbeam::sync::WaitGroup;
+use crossbeam::sync::WaitGroup;
 use failure::{ensure, format_err};
 use std::io::prelude::*;
 use std::io::{BufReader, BufWriter};
+use std::iter::ExactSizeIterator;
 use std::net::{Shutdown, SocketAddr, TcpStream};
-//use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex};
 
 /// Client that sends TCP requests to KVS server.
 /// Holds the TCP stream for its entire lifetime.
@@ -102,45 +103,57 @@ impl KvsClient {
     /// Send a SET request to the server
     pub fn set<'a>(
         mut self,
-        key: String,
-        value: String,
-        batch_size: u8,
+        kv_pairs: impl ExactSizeIterator<Item = (String, String)>,
     ) -> Result<impl Iterator<Item = Result<String>> + 'a> {
-        self.write_length(batch_size)?;
-        self.set_write(key, value)?;
+        let batch_size = kv_pairs.len();
+        self.write_length(batch_size as u8)?;
+
+        for (key, value) in kv_pairs {
+            self.set_write(key, value)?;
+        }
         self.finish_writing()?;
+
         Ok((0..batch_size).map(move |_| self.read_key()))
     }
 
     /// Send a GET request to the server. Key may not exist
     pub fn get<'a>(
         mut self,
-        key: String,
-        batch_size: u8,
+        keys: impl ExactSizeIterator<Item = String>,
     ) -> Result<impl Iterator<Item = Result<(String, Option<String>)>> + 'a> {
-        self.write_length(batch_size)?;
-        self.get_write(key)?;
+        let batch_size = keys.len();
+        self.write_length(batch_size as u8)?;
+
+        for key in keys {
+            self.get_write(key)?;
+        }
         self.finish_writing()?;
+
         Ok((0..batch_size).map(move |_| self.read_pair()))
     }
 
     /// Send a REMOVE request to the server
     pub fn remove<'a>(
         mut self,
-        key: String,
-        batch_size: u8,
+        keys: impl ExactSizeIterator<Item = String>,
     ) -> Result<impl Iterator<Item = Result<String>> + 'a> {
-        self.write_length(batch_size)?;
-        self.remove_write(key)?;
+        let batch_size = keys.len();
+        self.write_length(batch_size as u8)?;
+
+        for key in keys {
+            self.remove_write(key)?;
+        }
         self.finish_writing()?;
+
         Ok((0..batch_size).map(move |_| self.read_key()))
     }
 }
-/*
+
 /// Uses a threadpool to send multiple set or get requests
 pub struct ThreadedKvsClient<P: ThreadPool> {
     addr: SocketAddr,
     pool: P,
+    threads: u32,
 }
 
 impl<P: ThreadPool> ThreadedKvsClient<P> {
@@ -149,29 +162,63 @@ impl<P: ThreadPool> ThreadedKvsClient<P> {
         Ok(Self {
             addr,
             pool: P::new(threads)?,
+            threads,
         })
+    }
+
+    // Returns amount of requests to be batched in each thread
+    fn divide_work(&self, num_requests: usize) -> Vec<usize> {
+        let threads = self.threads as usize;
+        // Don't worry about overflow for now
+        let per_thread = num_requests / threads;
+        let mut remainder = num_requests % threads;
+
+        (0..threads)
+            .map(|_| {
+                if remainder > 0 {
+                    remainder -= 1;
+                    per_thread + 1
+                } else {
+                    per_thread
+                }
+            })
+            .take_while(|n| *n > 0)
+            .collect()
     }
 
     /// Set multiple key-value pairs concurrently. Blocks until all requests are done and returns
     /// Error is any operations failed.
-    pub fn set(&self, kv_pairs: impl Iterator<Item = (String, String)>) -> Result<()> {
+    pub fn set(&self, kv_pairs: Vec<(String, String)>) -> Result<()> {
         let wg = WaitGroup::new();
         let result = Arc::new(Mutex::new(Ok(())));
 
-        for (key, val) in kv_pairs {
+        let distribution = self.divide_work(kv_pairs.len());
+        assert_eq!(distribution.iter().sum::<usize>(), kv_pairs.len());
+        let mut kv_pairs = kv_pairs.into_iter();
+
+        for batch_size in distribution {
+            let batch: Vec<_> = kv_pairs.by_ref().take(batch_size).collect();
             let result = Arc::clone(&result);
-            let addr = self.addr.clone();
             let wg = wg.clone();
+            let addr = self.addr.clone();
 
             // Instead of panicking, all errors are sent to the outer result so we can track them
             // from the main thread
             self.pool.spawn(move || {
-                let client = KvsClient::new(addr);
+                let res = (|| {
+                    let client = KvsClient::new(&addr)?;
+                    client.set(batch.into_iter())
+                })();
 
-                if let Err(err) = client.set(key, val) {
-                    // Only panicks if result mutex is poisoned, which should never happen
-                    *result.lock().unwrap() = Err(err);
-                };
+                match res {
+                    Err(err) => *result.lock().unwrap() = Err(err),
+                    Ok(response) => {
+                        // If we get any error responses, it's an error
+                        if let Some(err) = response.into_iter().filter_map(Result::err).next() {
+                            *result.lock().unwrap() = Err(err);
+                        }
+                    }
+                }
 
                 drop(wg);
             })
@@ -189,30 +236,43 @@ impl<P: ThreadPool> ThreadedKvsClient<P> {
     /// closure that processes each retrieved value concurrently.
     pub fn get(
         &self,
-        keys: impl Iterator<Item = String>,
+        keys: Vec<String>,
         // Call for each retrieved value in the threads. Must not panic.
-        handler: impl Fn(Option<String>) -> Result<()> + Send + 'static + Clone,
+        handler: impl Fn((String, Option<String>)) -> Result<()> + Send + 'static + Clone,
     ) -> Result<()> {
         let wg = WaitGroup::new();
         let result = Arc::new(Mutex::new(Ok(())));
 
-        for key in keys {
+        let distribution = self.divide_work(keys.len());
+        assert_eq!(distribution.iter().sum::<usize>(), keys.len());
+        let mut keys = keys.into_iter();
+
+        for batch_size in distribution {
+            let batch: Vec<_> = keys.by_ref().take(batch_size).collect();
             let result = Arc::clone(&result);
-            let addr = self.addr.clone();
             let wg = wg.clone();
-            let handler = handler.clone();
+            let addr = self.addr.clone();
+            let mut handler = handler.clone();
 
             // Again, no panicking
             self.pool.spawn(move || {
-                let client = KvsClient::new(addr);
-
                 let handler_result = (|| {
-                    let val = client.get(key)?;
-                    handler(val)
+                    let client = KvsClient::new(&addr)?;
+                    client.get(batch.into_iter())
                 })();
 
-                if let Err(err) = handler_result {
-                    *result.lock().unwrap() = Err(err);
+                match handler_result {
+                    Err(err) => *result.lock().unwrap() = Err(err),
+                    Ok(response) => {
+                        if let Some(err) = response
+                            .into_iter()
+                            .map(|r| r.and_then(&mut handler))
+                            .filter_map(Result::err)
+                            .next()
+                        {
+                            *result.lock().unwrap() = Err(err);
+                        }
+                    }
                 }
 
                 drop(wg);
@@ -225,4 +285,3 @@ impl<P: ThreadPool> ThreadedKvsClient<P> {
         std::mem::replace(&mut *result, Ok(()))
     }
 }
-*/

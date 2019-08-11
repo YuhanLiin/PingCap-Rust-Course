@@ -88,7 +88,7 @@ fn write_threaded_kvstore<P: ThreadPool + Send + Sync + 'static>(c: &mut Criteri
                     kvs_clone.clear().unwrap();
                     data.clone()
                 },
-                |data| client.set(data.into_iter()).expect("set failed"),
+                |data| client.set(data).expect("set failed"),
                 BatchSize::SmallInput,
             )
         },

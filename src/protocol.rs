@@ -1,6 +1,6 @@
 use crate::Result;
 use serde::{Deserialize, Serialize};
-use serde_cbor::{from_reader, to_writer};
+use serde_cbor::{to_writer, Deserializer};
 use std::io::prelude::*;
 
 #[allow(missing_docs)]
@@ -26,7 +26,9 @@ pub enum Message {
 impl Message {
     /// Serialize a message from a Reader
     pub fn read(reader: impl Read) -> Result<Self> {
-        Ok(from_reader(reader)?)
+        let mut de = Deserializer::from_reader(reader);
+        let msg = serde::de::Deserialize::deserialize(&mut de)?;
+        Ok(msg)
     }
 
     /// Deserialize and send the message to a Writer
