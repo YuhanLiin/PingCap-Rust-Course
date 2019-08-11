@@ -4,6 +4,7 @@ use crossbeam::channel::{bounded, Receiver, Sender};
 use crossbeam::sync::WaitGroup;
 use failure::{ensure, format_err};
 use log::info;
+use std::io::ErrorKind;
 use std::io::Write;
 use std::net::{SocketAddr, TcpListener, TcpStream};
 
@@ -34,9 +35,16 @@ impl<E: KvsEngine, P: ThreadPool> KvsServer<E, P> {
         self.sender.send(())?;
 
         // Server could still be waiting for connections, so send one to unblock it
-        let mut stream = TcpStream::connect(addr)?;
-        stream.write(&[0])?;
-        stream.flush()?;
+        match TcpStream::connect(addr) {
+            Err(err) => match err.kind() {
+                // Server could have already shutdown after the cancellation signal, in which case
+                // we receive one of these connection errors that we ignore
+                ErrorKind::ConnectionRefused | ErrorKind::AddrNotAvailable => (),
+                _ => return Err(err.into()),
+            },
+            _ => (),
+        };
+
         Ok(())
     }
 

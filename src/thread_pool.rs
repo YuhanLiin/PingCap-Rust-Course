@@ -55,6 +55,7 @@ impl SharedQueueThreadPool {
                     job();
                     info!("Thread {} finished job", idx);
                 }) {
+                    eprintln!("Thread {} panicked", idx);
                     error!("Thread {} panicked, continuing", idx);
                 }
             }

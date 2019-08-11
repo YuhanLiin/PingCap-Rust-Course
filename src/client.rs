@@ -150,7 +150,7 @@ impl<P: ThreadPool> ThreadedKvsClient<P> {
                 };
 
                 drop(wg);
-            })
+            });
         }
 
         wg.wait();
