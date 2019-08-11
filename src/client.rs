@@ -100,10 +100,9 @@ impl<P: ThreadPool> ThreadedKvsClient<P> {
             self.pool.spawn(move || {
                 let client = KvsClient::new(addr);
 
-                match client.set(key, val) {
+                if let Err(err) = client.set(key, val) {
                     // Only panicks if result mutex is poisoned, which should never happen
-                    Err(err) => *result.lock().unwrap() = Err(err),
-                    _ => (),
+                    *result.lock().unwrap() = Err(err);
                 };
 
                 drop(wg);
@@ -144,10 +143,9 @@ impl<P: ThreadPool> ThreadedKvsClient<P> {
                     handler(val)
                 })();
 
-                match handler_result {
-                    Err(err) => *result.lock().unwrap() = Err(err),
-                    _ => (),
-                };
+                if let Err(err) = handler_result {
+                    *result.lock().unwrap() = Err(err);
+                }
 
                 drop(wg);
             });

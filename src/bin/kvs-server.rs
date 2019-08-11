@@ -31,7 +31,9 @@ impl TryFrom<Args> for Config {
     type Error = failure::Error;
 
     fn try_from(args: Args) -> Result<Config> {
-        let addr = args.addr.unwrap_or("127.0.0.1:4000".parse().unwrap());
+        let addr = args
+            .addr
+            .unwrap_or_else(|| "127.0.0.1:4000".parse().unwrap());
 
         // To remember which engine we used previously, we keep the engine name in a text file and
         // read it later to match.
