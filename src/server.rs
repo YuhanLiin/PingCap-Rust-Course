@@ -1,5 +1,6 @@
+use crate::protocol::*;
 use crate::thread_pool::ThreadPool;
-use crate::{protocol, KvsEngine, Result};
+use crate::{KvsEngine, Result};
 use crossbeam::channel::{bounded, Receiver, Sender};
 use crossbeam::sync::WaitGroup;
 use failure::{ensure, format_err};
@@ -69,18 +70,18 @@ impl<E: KvsEngine, P: ThreadPool> KvsServer<E, P> {
             let mut store = self.engine.clone();
 
             self.pool.spawn(move || {
-                let msg = protocol::Message::read(&mut stream).expect("message read error");
+                let msg = Message::read(&mut stream).expect("message read error");
                 info!("Finished reading request from stream");
 
                 let resp = match Self::handle_request(msg, &mut store) {
                     Ok(value) => {
                         info!("Request SUCCESS, reply: {}", value.join(" "));
-                        protocol::Message::Array(value)
+                        Message::Array(value)
                     }
                     Err(err) => {
                         let err = err.as_fail().to_string();
                         info!("Request FAILED, reply: {}", err);
-                        protocol::Message::Error(err)
+                        Message::Error(err)
                     }
                 };
                 resp.write(&mut stream).expect("message write error");
@@ -94,13 +95,13 @@ impl<E: KvsEngine, P: ThreadPool> KvsServer<E, P> {
 
     // Get returns a single element list or empty list if element is not found
     // Set and Remove also return empty lists
-    fn handle_request(msg: protocol::Message, store: &mut E) -> Result<Vec<String>> {
+    fn handle_request(msg: Message, store: &mut E) -> Result<Vec<String>> {
         match msg {
-            protocol::Message::Array(arr) => {
+            Message::Array(arr) => {
                 info!("Received TCP args: {}", arr.join(" "));
 
                 match arr.get(0).map(|s| &s[..]) {
-                    Some(protocol::GET) => {
+                    Some(GET) => {
                         check_len(&arr, 2)?;
                         let key = &arr[1];
                         // If value does not exist, return empty list
@@ -110,14 +111,14 @@ impl<E: KvsEngine, P: ThreadPool> KvsServer<E, P> {
                             .unwrap_or_default())
                     }
 
-                    Some(protocol::SET) => {
+                    Some(SET) => {
                         check_len(&arr, 3)?;
                         let (key, value) = (&arr[1], &arr[2]);
                         store.set(key.to_owned(), value.to_owned())?;
                         Ok(Vec::new())
                     }
 
-                    Some(protocol::REMOVE) => {
+                    Some(REMOVE) => {
                         check_len(&arr, 2)?;
                         let key = &arr[1];
                         store.remove(key.to_owned())?;
@@ -127,7 +128,7 @@ impl<E: KvsEngine, P: ThreadPool> KvsServer<E, P> {
                     _ => Err(format_err!("invalid incoming message")),
                 }
             }
-            protocol::Message::Error(err) => Err(format_err!("received error message {}", err)),
+            Message::Error(err) => Err(format_err!("received error message {}", err)),
         }
     }
 }

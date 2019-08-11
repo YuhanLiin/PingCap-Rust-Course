@@ -1,4 +1,4 @@
-use crate::protocol;
+use crate::protocol::*;
 use crate::thread_pool::ThreadPool;
 use crate::Result;
 use crossbeam::sync::WaitGroup;
@@ -18,32 +18,32 @@ impl KvsClient {
         Self { addr }
     }
 
-    fn send(&self, req: protocol::Message) -> Result<protocol::Message> {
+    fn send(&self, req: Message) -> Result<Message> {
         let mut stream = TcpStream::connect(&self.addr)?;
         req.write(&mut stream)?;
         // Need to shutdown write socket so server read socket gets dropped, otherwise server read
         // never finishes
         stream.shutdown(Shutdown::Write)?;
-        Ok(protocol::Message::read(&mut stream)?)
+        Ok(Message::read(&mut stream)?)
     }
 
     /// Send a SET request to the server
     pub fn set(&self, key: String, value: String) -> Result<()> {
-        let req = protocol::Message::Array(vec![protocol::SET.to_owned(), key, value]);
+        let req = Message::Array(vec![SET.to_owned(), key, value]);
 
         match self.send(req)? {
-            protocol::Message::Error(err) => Err(format_err!("Error: {}", err)),
+            Message::Error(err) => Err(format_err!("Error: {}", err)),
             _ => Ok(()),
         }
     }
 
     /// Send a GET request to the server. Key may not exist
     pub fn get(&self, key: String) -> Result<Option<String>> {
-        let req = protocol::Message::Array(vec![protocol::GET.to_owned(), key]);
+        let req = Message::Array(vec![GET.to_owned(), key]);
 
         match self.send(req)? {
-            protocol::Message::Error(err) => Err(format_err!("Error: {}", err)),
-            protocol::Message::Array(arr) => {
+            Message::Error(err) => Err(format_err!("Error: {}", err)),
+            Message::Array(arr) => {
                 if arr.is_empty() {
                     Ok(None)
                 } else {
@@ -60,10 +60,10 @@ impl KvsClient {
 
     /// Send a REMOVE request to the server
     pub fn remove(&self, key: String) -> Result<()> {
-        let req = protocol::Message::Array(vec![protocol::REMOVE.to_owned(), key]);
+        let req = Message::Array(vec![REMOVE.to_owned(), key]);
 
         match self.send(req)? {
-            protocol::Message::Error(err) => Err(format_err!("Error: {}", err)),
+            Message::Error(err) => Err(format_err!("Error: {}", err)),
             _ => Ok(()),
         }
     }
