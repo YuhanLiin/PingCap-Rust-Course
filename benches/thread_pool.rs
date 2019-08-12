@@ -9,7 +9,6 @@ use kvs::{
 use rand::{distributions::Alphanumeric, rngs::StdRng, Rng, SeedableRng};
 use std::net::SocketAddr;
 use std::path::Path;
-use std::sync::Arc;
 use std::thread::{spawn, JoinHandle};
 use tempfile::TempDir;
 
@@ -35,24 +34,27 @@ fn new_kvs(path: &Path) -> KvStore {
 }
 
 // Holds the resources necessary to shutdown a running server when dropped
-struct ServerHandle<E: KvsEngine + Sync, P: ThreadPool + Send + Sync + 'static> {
+struct ServerHandle<E: KvsEngine, P: ThreadPool + Send + Sync + 'static> {
     thread: JoinHandle<Result<()>>,
-    server: Arc<KvsServer<E, P>>,
+    server: KvsServer<E, P>,
 }
 
-impl<E: KvsEngine + Sync, P: ThreadPool + Send + Sync + 'static> ServerHandle<E, P> {
-    fn run(server: Arc<KvsServer<E, P>>) -> Self {
-        let server_clone = Arc::clone(&server);
+impl<E: KvsEngine, P: ThreadPool + Send + Sync + 'static> ServerHandle<E, P> {
+    fn run(server: &KvsServer<E, P>) -> Self {
+        let server_clone = server.clone();
         let bind_event = WaitGroup::new();
         let cloned_event = WaitGroup::clone(&bind_event);
         let thread = spawn(move || server_clone.run(&tcp_addr(), Some(cloned_event)));
         // Wait for server to finish binding so we don't get "connection refused"
         bind_event.wait();
-        Self { server, thread }
+        Self {
+            server: server.clone(),
+            thread,
+        }
     }
 }
 
-impl<E: KvsEngine + Sync, P: ThreadPool + Send + Sync + 'static> Drop for ServerHandle<E, P> {
+impl<E: KvsEngine, P: ThreadPool + Send + Sync + 'static> Drop for ServerHandle<E, P> {
     // Shuts down the server and joins the thread. This work is done outside the benchmark.
     fn drop(&mut self) {
         self.server.shutdown(&tcp_addr()).expect("shutdown failed");
@@ -76,12 +78,12 @@ fn write_threaded_kvstore<P: ThreadPool + Send + Sync + 'static>(c: &mut Criteri
         move |b, &&threads| {
             let kvs = new_kvs(&temp.path());
             let kvs_clone = kvs.clone();
-            let server = Arc::new(KvsServer::<_, P>::new(kvs, threads).expect("server problem"));
+            let server = KvsServer::<_, P>::new(kvs, threads).expect("server problem");
             let client = ThreadedKvsClient::<P>::new(tcp_addr(), threads).expect("client problem");
 
             // We only care about dropping this value
             #[allow(unused)]
-            let handle = ServerHandle::run(Arc::clone(&server));
+            let handle = ServerHandle::run(&server);
 
             b.iter_batched(
                 || {

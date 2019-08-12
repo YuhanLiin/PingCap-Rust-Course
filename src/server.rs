@@ -17,6 +17,18 @@ pub struct KvsServer<E: KvsEngine, P: ThreadPool + Send + Sync + 'static> {
     sender: Sender<()>,
 }
 
+// Derive clone is not working properly, so we have to write this manually
+impl<E: KvsEngine, P: ThreadPool + Send + Sync + 'static> Clone for KvsServer<E, P> {
+    fn clone(&self) -> Self {
+        Self {
+            engine: self.engine.clone(),
+            pool: self.pool.clone(),
+            receiver: self.receiver.clone(),
+            sender: self.sender.clone(),
+        }
+    }
+}
+
 impl<E: KvsEngine, P: ThreadPool + Send + Sync + 'static> KvsServer<E, P> {
     /// Instantiates threadpools and specifies underlying engine
     pub fn new(engine: E, num_threads: u32) -> Result<Self> {
