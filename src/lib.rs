@@ -6,6 +6,7 @@ use log::error;
 use serde::{Deserialize, Serialize};
 use serde_cbor::{to_writer, Deserializer};
 use std::cell::{RefCell, RefMut};
+use std::collections::HashMap;
 use std::fs::{read_dir, remove_file, rename, File, OpenOptions};
 use std::io::prelude::*;
 use std::io::{BufReader, BufWriter, Seek, SeekFrom};
@@ -28,6 +29,11 @@ pub mod thread_pool;
 #[derive(Debug, Fail)]
 #[fail(display = "Key not found")]
 pub struct KeyNotFound;
+
+/// Error thrown by remove() when the key does not exist
+#[derive(Debug, Fail)]
+#[fail(display = "File data corrupted")]
+pub struct CorruptData;
 
 #[derive(Debug, Serialize, Deserialize)]
 enum Command {
@@ -175,15 +181,16 @@ impl KvStore {
         let log_path = log_path(&dir, gen);
 
         let (index_r, index_w) = evmap::with_meta(gen);
-        // TODO build index
-
         let dir = Arc::new(dir.to_owned());
-        let writer = KvsWriter {
+        let writer = BufWriter::new(open_write().create(true).open(&log_path)?);
+        let reader = BufReader::new(open_read().open(&log_path)?);
+
+        let mut writer = KvsWriter {
             dir: dir.clone(),
-            reader: BufReader::new(open_read().open(&log_path)?),
-            writer: BufWriter::new(open_read().open(&log_path)?),
             index: index_w,
             stale_bytes: 0,
+            writer,
+            reader,
         };
 
         let reader = KvsReader {
@@ -191,6 +198,8 @@ impl KvStore {
             index: index_r,
             reader: RefCell::new((None, gen)),
         };
+
+        writer.build_index()?;
 
         Ok(Self {
             reader,
@@ -260,6 +269,53 @@ struct KvsWriter {
 }
 
 impl KvsWriter {
+    // This is only ever called from open(), so we don't need to worry about synchronization
+    fn build_index(&mut self) -> Result<()> {
+        // Read from beginning
+        let mut start = self.reader.seek(SeekFrom::Start(0))?;
+        let mut index: HashMap<_, Range> = HashMap::new();
+
+        // Check if EOF has been reached
+        while !self.reader.fill_buf()?.is_empty() {
+            // For some reason calling byte_offset() on CBOR deserializers does not work for
+            // files, so we have to get log offsets using seek() instead.
+            // Deserialize command manually
+            let mut de = Deserializer::from_reader(&mut self.reader);
+            let cmd = serde::de::Deserialize::deserialize(&mut de)?;
+            let end = self.reader.seek(SeekFrom::Current(0))?;
+
+            match cmd {
+                Command::Set { key, .. } => {
+                    if let Some(old) = index.get(&key) {
+                        self.stale_bytes += old.len();
+                    }
+                    index.insert(key, Range::new((start, end)));
+                }
+                Command::Remove { key } => {
+                    match index.get(&key) {
+                        None => {
+                            error!(
+                                "Data corrupted, as remove was found in file before set for key {}",
+                                key
+                            );
+                            return Err(CorruptData.into());
+                        }
+                        Some(old) => self.stale_bytes += old.len(),
+                    }
+                    index.remove(&key);
+                }
+            };
+
+            start = end;
+        }
+
+        self.index
+            .extend(index.into_iter().map(|(k, r)| (k, (r.start, r.end))));
+        self.index.refresh();
+
+        Ok(())
+    }
+
     fn remove(&mut self, key: String) -> Result<()> {
         let value = self.index.get_and(&key, |v| Range::new(v[0]));
 
