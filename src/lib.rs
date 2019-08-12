@@ -170,7 +170,7 @@ impl KvStore {
         let gen = all_log_files(&dir, None)?
             .iter()
             .filter_map(|path| {
-                path.file_name()
+                path.file_stem()
                     .and_then(std::ffi::OsStr::to_str)
                     .filter(|name| name.starts_with("kvs_"))
                     .and_then(|name| name.rsplit("_").next())
@@ -235,13 +235,12 @@ fn all_log_files(dir: &Path, preserve_gen: Option<u64>) -> Result<Vec<PathBuf>> 
             let path = entry.path();
 
             if entry.metadata()?.is_file() {
-                let (name, stem) = (path.file_name(), path.file_stem());
-                if let (Some(stem), Some(name)) = (stem, name) {
-                    if stem == "cbor" {
+                if let (Some(extension), Some(stem)) = (path.extension(), path.file_stem()) {
+                    if extension == "cbor" {
                         // Wipe out every cbor file except the one that maps to the generation we want
                         // to keep
                         let useless = if let Some(gen) = preserve_gen {
-                            name != &format!("kvs_{}", gen)[..]
+                            stem != &format!("kvs_{}", gen)[..]
                         } else {
                             true
                         };
@@ -405,13 +404,14 @@ impl KvsWriter {
         let index: Vec<_> = self.index.map_into(|k, v| (k.to_owned(), Range::new(v[0])));
         for (key, offset) in index {
             self.reader.seek(SeekFrom::Start(offset.start))?;
-
-            let mut buf = Vec::with_capacity(offset.len() as usize);
-            buf.resize(offset.len() as usize, 0);
-            self.reader.read_exact(&mut buf)?;
-
             let new_offset = compact_file.seek(SeekFrom::Current(0))?;
-            compact_file.write_all(&mut buf)?;
+
+            let mut bytes = self.reader.by_ref().bytes();
+            for _ in 0..offset.len() {
+                let buf = [bytes.next().ok_or(CorruptData)??];
+                compact_file.write_all(&buf)?;
+            }
+
             // Update new index with offsets in the new file
             new_offsets.push((key, (new_offset, new_offset + offset.len())));
         }
